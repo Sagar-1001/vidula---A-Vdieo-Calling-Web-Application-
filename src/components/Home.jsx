@@ -11,6 +11,8 @@ import VideoMeetComponent from './VideoMeet';
 gsap.registerPlugin(ScrollTrigger);
 
 const Home = ({ userName, setUserName, isLoggedIn }) => {
+  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+  
   const [showJoinInput, setShowJoinInput] = useState(false);
   const [meetingCode, setMeetingCode] = useState('');
   const [joinError, setJoinError] = useState('');
@@ -146,7 +148,7 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
     // Optional: Check with backend if meeting exists
     if (token) {
       try {
-        const response = await fetch(`http://localhost:5001/api/meetings/${meetingCode.trim()}/join`, {
+      const response = await fetch(`${API_URL}/api/meetings/${meetingCode.trim()}/join`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -190,7 +192,7 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
       const token = localStorage.getItem('token');
       
       if (token) {
-        const response = await fetch('http://localhost:5001/api/meetings/create', {
+        const response = await fetch(`${API_URL}/api/meetings/create`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

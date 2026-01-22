@@ -4,6 +4,8 @@ import { FaBars, FaTimes, FaVideo, FaUser } from 'react-icons/fa';
 import PenguinEyes from './PenguinEyes';
 
 const Navbar = ({ isLoggedIn, setIsLoggedIn, currentUser, setCurrentUser }) => {
+  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+  
   const navigate = useNavigate();
   const location = useLocation();
   const isContactPage = location.pathname === '/contact';
@@ -70,7 +72,7 @@ const Navbar = ({ isLoggedIn, setIsLoggedIn, currentUser, setCurrentUser }) => {
       
       const isEmail = email.includes('@');
       
-      const response = await fetch('http://localhost:5000/api/users/login', {
+    const response = await fetch(`${API_URL}/api/users/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -110,7 +112,7 @@ const Navbar = ({ isLoggedIn, setIsLoggedIn, currentUser, setCurrentUser }) => {
     
     if (email && password && name) {
       try {
-        const response = await fetch('http://localhost:5000/api/users/register', {
+       const response = await fetch(`${API_URL}/api/users/register`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

@@ -49,7 +49,9 @@ const Room = ({ userName, onRoomEnter, onRoomExit }) => {
     if (hasJoinedRoom.current) return;
     hasJoinedRoom.current = true;
     
-    socketRef.current = io('http://localhost:5000', {
+   const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
+
+  socketRef.current = io(SOCKET_URL, {
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionAttempts: 5,
