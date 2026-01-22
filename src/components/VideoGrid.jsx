@@ -1,0 +1,218 @@
+import { useEffect, useRef } from 'react';
+
+const VideoGrid = ({ peers, myStream, myVideoRef, userName, myPeerId, participants, isRoomCreator }) => {
+  const peerVideoRefs = useRef({});
+  const totalParticipants = Object.keys(peers).length + 1;
+  const isOneOnOne = totalParticipants === 2;
+  
+  // Debug logs
+  useEffect(() => {
+    console.log("VideoGrid - Total participants:", totalParticipants);
+    console.log("VideoGrid - isRoomCreator:", isRoomCreator);
+    console.log("VideoGrid - myPeerId:", myPeerId);
+    console.log("VideoGrid - peers:", Object.keys(peers));
+    console.log("VideoGrid - myStream:", myStream);
+  }, [isRoomCreator, participants, myPeerId, peers, myStream, totalParticipants]);
+  
+  // Update peer video streams
+  useEffect(() => {
+    Object.entries(peers).forEach(([peerId, stream]) => {
+      const videoElement = peerVideoRefs.current[peerId];
+      if (videoElement && videoElement.srcObject !== stream) {
+        console.log(`Setting stream for peer: ${peerId}`);
+        videoElement.srcObject = stream;
+        // Force play
+        videoElement.play().catch(err => console.error('Error playing peer video:', err));
+      }
+    });
+  }, [peers]);
+  
+  // Ensure my video plays
+  useEffect(() => {
+    if (myVideoRef.current && myStream) {
+      console.log("Setting my stream");
+      myVideoRef.current.srcObject = myStream;
+      myVideoRef.current.play().catch(err => console.error('Error playing my video:', err));
+    }
+  }, [myStream, myVideoRef]);
+  
+  // Grid layout calculation
+  const getGridStyle = () => {
+    if (totalParticipants === 1) {
+      return { 
+        display: 'grid', 
+        gridTemplateColumns: '1fr',
+        gridTemplateRows: '1fr',
+        gap: '8px',
+        padding: '8px',
+        width: '100%',
+        height: '100%'
+      };
+    } else if (totalParticipants === 2) {
+      return { 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(2, 1fr)',
+        gridTemplateRows: '1fr',
+        gap: '8px',
+        padding: '8px',
+        width: '100%',
+        height: '100%'
+      };
+    } else if (totalParticipants <= 4) {
+      return { 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(2, 1fr)',
+        gridTemplateRows: 'repeat(2, 1fr)',
+        gap: '8px',
+        padding: '8px',
+        width: '100%',
+        height: '100%'
+      };
+    } else {
+      return { 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(3, 1fr)',
+        gridTemplateRows: 'auto',
+        gap: '8px',
+        padding: '8px',
+        width: '100%',
+        height: '100%',
+        overflowY: 'auto'
+      };
+    }
+  };
+  
+  const videoContainerStyle = {
+    position: 'relative',
+    backgroundColor: '#1a1a1a',
+    borderRadius: '8px',
+    overflow: 'hidden',
+    minHeight: '200px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center'
+  };
+  
+  const videoElementStyle = {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+    transform: 'scaleX(-1)', // Mirror effect
+    backgroundColor: '#000'
+  };
+  
+  const videoOverlayStyle = {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    background: 'linear-gradient(to top, rgba(0,0,0,0.7), transparent)',
+    padding: '8px 12px',
+    color: 'white'
+  };
+  
+  const participantNameStyle = {
+    fontSize: '14px',
+    fontWeight: '500',
+    textShadow: '0 1px 2px rgba(0,0,0,0.5)'
+  };
+  
+  const placeholderStyle = {
+    ...videoContainerStyle,
+    flexDirection: 'column',
+    gap: '12px'
+  };
+  
+  const avatarCircleStyle = {
+    width: '80px',
+    height: '80px',
+    borderRadius: '50%',
+    backgroundColor: '#374151',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: '32px',
+    fontWeight: 'bold',
+    color: 'white'
+  };
+  
+  return (
+    <div style={{ 
+      position: 'relative', 
+      flex: 1, 
+      overflow: 'hidden', 
+      backgroundColor: '#000',
+      width: '100%',
+      height: '100%'
+    }}>
+      <div style={getGridStyle()}>
+        {/* My Video */}
+        <div style={videoContainerStyle}>
+          <video
+            ref={myVideoRef}
+            muted
+            autoPlay
+            playsInline
+            style={videoElementStyle}
+          />
+          <div style={videoOverlayStyle}>
+            <div style={participantNameStyle}>
+              {userName} (You) {isRoomCreator ? '🔴 Creator' : ''}
+              {participants[myPeerId]?.isScreenSharing && ' 📺 Screen'}
+            </div>
+          </div>
+        </div>
+        
+        {/* Peer Videos */}
+        {Object.entries(peers).map(([peerId, stream]) => {
+          const participant = participants[peerId];
+          console.log(`Rendering peer video for: ${peerId}`, participant);
+          
+          return (
+            <div key={peerId} style={videoContainerStyle}>
+              <video
+                ref={element => {
+                  if (element && !peerVideoRefs.current[peerId]) {
+                    console.log(`Creating video ref for peer: ${peerId}`);
+                    peerVideoRefs.current[peerId] = element;
+                    element.srcObject = stream;
+                    element.play().catch(err => console.error(`Error playing video for ${peerId}:`, err));
+                  }
+                }}
+                autoPlay
+                playsInline
+                style={videoElementStyle}
+              />
+              <div style={videoOverlayStyle}>
+                <div style={participantNameStyle}>
+                  {participant?.name || 'Participant'}
+                  {participant?.isCreator ? ' 🔴 Creator' : ''}
+                  {participant?.isScreenSharing && ' 📺 Screen'}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        
+        {/* Placeholder for waiting */}
+        {totalParticipants === 1 && (
+          <div style={placeholderStyle}>
+            <div style={avatarCircleStyle}>
+              <span>👥</span>
+            </div>
+            <div style={{ color: '#9ca3af', textAlign: 'center' }}>
+              <div style={{ fontSize: '16px', fontWeight: '500', marginBottom: '4px' }}>
+                Waiting for others to join
+              </div>
+              <div style={{ fontSize: '14px' }}>
+                Share the room ID to invite participants
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default VideoGrid;
