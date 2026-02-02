@@ -31,6 +31,19 @@ const meetingSchema = new mongoose.Schema({
       default: Date.now
     }
   }],
+  roomType: {
+    type: String,
+    enum: ['public', 'private'],
+    default: 'public'
+  },
+  waitingRoom: [{
+    userId: String,
+    userName: String,
+    socketId: String,
+    requestedAt: { type: Date, default: Date.now }
+  }],
+  deniedUsers: [String],
+
   startTime: {
     type: Date,
     default: Date.now

@@ -32,7 +32,7 @@ function Profile() {
         email: parsedUserData.email || 'user@example.com',
         joinDate: parsedUserData.joinDate || new Date().toLocaleDateString(),
         meetingsAttended: 12, // Mock data
-        meetingsCreated: 5    // Mock data
+        meetingsCreated: 3    // Mock data
       });
       setIsLoading(false);
     } catch (err) {

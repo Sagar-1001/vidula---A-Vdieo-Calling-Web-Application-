@@ -3,40 +3,24 @@ import { useEffect, useRef } from 'react';
 const VideoGrid = ({ peers, myStream, myVideoRef, userName, myPeerId, participants, isRoomCreator }) => {
   const peerVideoRefs = useRef({});
   const totalParticipants = Object.keys(peers).length + 1;
-  const isOneOnOne = totalParticipants === 2;
   
-  // Debug logs
-  useEffect(() => {
-    console.log("VideoGrid - Total participants:", totalParticipants);
-    console.log("VideoGrid - isRoomCreator:", isRoomCreator);
-    console.log("VideoGrid - myPeerId:", myPeerId);
-    console.log("VideoGrid - peers:", Object.keys(peers));
-    console.log("VideoGrid - myStream:", myStream);
-  }, [isRoomCreator, participants, myPeerId, peers, myStream, totalParticipants]);
-  
-  // Update peer video streams
   useEffect(() => {
     Object.entries(peers).forEach(([peerId, stream]) => {
       const videoElement = peerVideoRefs.current[peerId];
       if (videoElement && videoElement.srcObject !== stream) {
-        console.log(`Setting stream for peer: ${peerId}`);
         videoElement.srcObject = stream;
-        // Force play
         videoElement.play().catch(err => console.error('Error playing peer video:', err));
       }
     });
   }, [peers]);
   
-  // Ensure my video plays
   useEffect(() => {
     if (myVideoRef.current && myStream) {
-      console.log("Setting my stream");
       myVideoRef.current.srcObject = myStream;
       myVideoRef.current.play().catch(err => console.error('Error playing my video:', err));
     }
   }, [myStream, myVideoRef]);
   
-  // Grid layout calculation
   const getGridStyle = () => {
     if (totalParticipants === 1) {
       return { 
@@ -97,7 +81,7 @@ const VideoGrid = ({ peers, myStream, myVideoRef, userName, myPeerId, participan
     width: '100%',
     height: '100%',
     objectFit: 'cover',
-    transform: 'scaleX(-1)', // Mirror effect
+    transform: 'scaleX(-1)',
     backgroundColor: '#000'
   };
   
@@ -106,15 +90,16 @@ const VideoGrid = ({ peers, myStream, myVideoRef, userName, myPeerId, participan
     bottom: 0,
     left: 0,
     right: 0,
-    background: 'linear-gradient(to top, rgba(0,0,0,0.7), transparent)',
-    padding: '8px 12px',
+    background: 'linear-gradient(to top, rgba(0,0,0,0.8), transparent)',
+    padding: '10px 14px',
     color: 'white'
   };
   
   const participantNameStyle = {
     fontSize: '14px',
-    fontWeight: '500',
-    textShadow: '0 1px 2px rgba(0,0,0,0.5)'
+    fontWeight: '600',
+    textShadow: '0 2px 4px rgba(0,0,0,0.8)',
+    color: 'white'
   };
   
   const placeholderStyle = {
@@ -146,7 +131,6 @@ const VideoGrid = ({ peers, myStream, myVideoRef, userName, myPeerId, participan
       height: '100%'
     }}>
       <div style={getGridStyle()}>
-        {/* My Video */}
         <div style={videoContainerStyle}>
           <video
             ref={myVideoRef}
@@ -157,23 +141,22 @@ const VideoGrid = ({ peers, myStream, myVideoRef, userName, myPeerId, participan
           />
           <div style={videoOverlayStyle}>
             <div style={participantNameStyle}>
-              {userName} (You) {isRoomCreator ? '🔴 Creator' : ''}
-              {participants[myPeerId]?.isScreenSharing && ' 📺 Screen'}
+              {userName} (You)
+              {isRoomCreator && <span style={{ marginLeft: '8px', color: '#ef4444' }}>• Host</span>}
+              {participants[myPeerId]?.isScreenSharing && <span style={{ marginLeft: '8px', color: '#60a5fa' }}>• Screen</span>}
             </div>
           </div>
         </div>
         
-        {/* Peer Videos */}
         {Object.entries(peers).map(([peerId, stream]) => {
           const participant = participants[peerId];
-          console.log(`Rendering peer video for: ${peerId}`, participant);
+          const displayName = participant?.userName || participant?.name || 'Loading...';
           
           return (
             <div key={peerId} style={videoContainerStyle}>
               <video
                 ref={element => {
                   if (element && !peerVideoRefs.current[peerId]) {
-                    console.log(`Creating video ref for peer: ${peerId}`);
                     peerVideoRefs.current[peerId] = element;
                     element.srcObject = stream;
                     element.play().catch(err => console.error(`Error playing video for ${peerId}:`, err));
@@ -185,16 +168,15 @@ const VideoGrid = ({ peers, myStream, myVideoRef, userName, myPeerId, participan
               />
               <div style={videoOverlayStyle}>
                 <div style={participantNameStyle}>
-                  {participant?.name || 'Participant'}
-                  {participant?.isCreator ? ' 🔴 Creator' : ''}
-                  {participant?.isScreenSharing && ' 📺 Screen'}
+                  {displayName}
+                  {participant?.isCreator && <span style={{ marginLeft: '8px', color: '#ef4444' }}>• Host</span>}
+                  {participant?.isScreenSharing && <span style={{ marginLeft: '8px', color: '#60a5fa' }}>• Screen</span>}
                 </div>
               </div>
             </div>
           );
         })}
         
-        {/* Placeholder for waiting */}
         {totalParticipants === 1 && (
           <div style={placeholderStyle}>
             <div style={avatarCircleStyle}>

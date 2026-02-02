@@ -16,230 +16,446 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const server = http.createServer(app);
+
+// CORS Configuration
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:5174',
+  process.env.CLIENT_URL,
+  'https://vidula-a-vdieo-calling-web-application.onrender.com'
+].filter(Boolean);
+
 const io = new Server(server, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' ? false : '*',
-    methods: ['GET', 'POST']
-  }
+    origin: allowedOrigins,
+    methods: ['GET', 'POST'],
+    credentials: true
+  },
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
-app.use(cors());
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log('❌ Blocked by CORS:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Connect to MongoDB
 connectDB()
-  .then(() => console.log('MongoDB Atlas connected successfully'))
-  .catch(err => console.log('MongoDB connection error:', err));
+  .then(() => console.log('✅ MongoDB Atlas connected'))
+  .catch(err => console.log('❌ MongoDB connection error:', err));
 
+// API Routes
 app.use('/api/users', userRoutes);
 app.use('/api/meetings', meetingRoutes);
 
-// Room management
-const rooms = {};
-const roomCreators = {};
-const userToRoom = {}; // Track which room each user is in
+// ============================================================================
+// ROOM MANAGEMENT DATA STRUCTURES
+// ============================================================================
+
+const rooms = new Map(); // roomId -> Room object
+const userSockets = new Map(); // userId -> socket.id
+const socketUsers = new Map(); // socket.id -> userId
+
+// Room structure:
+// {
+//   roomId: string,
+//   roomType: 'public' | 'private',
+//   creatorId: string,
+//   creatorName: string,
+//   participants: Map<userId, ParticipantInfo>,
+//   waitingRoom: Array<WaitingUser>,
+//   deniedUsers: Set<userId>
+// }
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+function createRoom(roomId, creatorId, creatorName, roomType = 'public') {
+  const room = {
+    roomId,
+    roomType,
+    creatorId,
+    creatorName,
+    participants: new Map(),
+    waitingRoom: [],
+    deniedUsers: new Set()
+  };
+  rooms.set(roomId, room);
+  console.log(`✅ Created ${roomType} room: ${roomId}`);
+  return room;
+}
+
+function addParticipant(roomId, userId, userName, socketId) {
+  const room = rooms.get(roomId);
+  if (!room) return false;
+  
+  const isCreator = room.creatorId === userId;
+  
+  room.participants.set(userId, {
+    userId,
+    userName,
+    socketId,
+    isCreator,
+    videoEnabled: true,
+    audioEnabled: true,
+    isScreenSharing: false,
+    joinedAt: Date.now()
+  });
+  
+  userSockets.set(userId, socketId);
+  socketUsers.set(socketId, userId);
+  
+  console.log(`✅ Added ${userName} to room ${roomId} (${room.participants.size} total)`);
+  return true;
+}
+
+function removeParticipant(socketId) {
+  const userId = socketUsers.get(socketId);
+  if (!userId) return null;
+  
+  let roomId = null;
+  for (const [rId, room] of rooms.entries()) {
+    if (room.participants.has(userId)) {
+      roomId = rId;
+      room.participants.delete(userId);
+      break;
+    }
+  }
+  
+  socketUsers.delete(socketId);
+  userSockets.delete(userId);
+  
+  return { userId, roomId };
+}
+
+function getRoom(roomId) {
+  return rooms.get(roomId);
+}
+
+function getRoomParticipantsArray(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return [];
+  return Array.from(room.participants.values());
+}
+
+function cleanupEmptyRoom(roomId) {
+  const room = rooms.get(roomId);
+  if (room && room.participants.size === 0) {
+    rooms.delete(roomId);
+    console.log(`🗑️  Deleted empty room: ${roomId}`);
+    return true;
+  }
+  return false;
+}
+
+// ============================================================================
+// SOCKET.IO EVENT HANDLERS
+// ============================================================================
 
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
-
-  // JOIN ROOM - Main entry point
-  socket.on('join-room', (roomId, userId, userName) => {
-    console.log(`User ${userName} (${userId}) joining room ${roomId}`);
+  console.log(`\n🔌 Socket connected: ${socket.id}`);
+  
+  // -------------------------------------------------------------------------
+  // REQUEST TO JOIN ROOM
+  // -------------------------------------------------------------------------
+  socket.on('request-join-room', (roomId, userId, userName) => {
+    console.log(`\n📥 JOIN REQUEST: ${userName} (${userId}) → Room ${roomId}`);
     
-    // Join the socket.io room
+    const room = getRoom(roomId);
+    
+    // If room doesn't exist, auto-approve (will be created)
+    if (!room) {
+      console.log(`  ✅ Room doesn't exist - auto-approving`);
+      socket.emit('join-approved', roomId);
+      return;
+    }
+    
+    // Check if user was previously denied
+    if (room.deniedUsers.has(userId)) {
+      console.log(`  ❌ User was previously denied`);
+      socket.emit('join-denied', 'You were previously denied access to this room');
+      return;
+    }
+    
+    // Public rooms: auto-approve
+    if (room.roomType === 'public') {
+      console.log(`  ✅ Public room - auto-approving`);
+      socket.emit('join-approved', roomId);
+      return;
+    }
+    
+    // Private rooms: add to waiting room
+    console.log(`  ⏳ Private room - adding to waiting room`);
+    
+    // Check if already waiting
+    const alreadyWaiting = room.waitingRoom.find(u => u.userId === userId);
+    if (alreadyWaiting) {
+      console.log(`  ⚠️  Already in waiting room`);
+      socket.emit('waiting-for-approval', `Waiting for ${room.creatorName} to let you in...`);
+      return;
+    }
+    
+    // Add to waiting room
+    const waitingUser = {
+      userId,
+      userName,
+      socketId: socket.id,
+      requestedAt: Date.now()
+    };
+    room.waitingRoom.push(waitingUser);
+    
+    // Notify user they're waiting
+    socket.emit('waiting-for-approval', `Waiting for ${room.creatorName} to let you in...`);
+    
+    // Notify creator
+    const creatorSocketId = userSockets.get(room.creatorId);
+    if (creatorSocketId) {
+      io.to(creatorSocketId).emit('join-request', waitingUser);
+      io.to(creatorSocketId).emit('waiting-room-updated', room.waitingRoom);
+    }
+    
+    console.log(`  ✅ Added to waiting room (${room.waitingRoom.length} waiting)`);
+  });
+  
+  // -------------------------------------------------------------------------
+  // APPROVE JOIN REQUEST
+  // -------------------------------------------------------------------------
+  socket.on('approve-join', (roomId, userId) => {
+    console.log(`\n✅ APPROVE: ${userId} → Room ${roomId}`);
+    
+    const room = getRoom(roomId);
+    if (!room) {
+      console.log(`  ❌ Room not found`);
+      return;
+    }
+    
+    const waitingUser = room.waitingRoom.find(u => u.userId === userId);
+    if (!waitingUser) {
+      console.log(`  ❌ User not in waiting room`);
+      return;
+    }
+    
+    // Remove from waiting room
+    room.waitingRoom = room.waitingRoom.filter(u => u.userId !== userId);
+    
+    // Send approval to user
+    io.to(waitingUser.socketId).emit('join-approved', roomId);
+    
+    // Update waiting room list for creator
+    const creatorSocketId = userSockets.get(room.creatorId);
+    if (creatorSocketId) {
+      io.to(creatorSocketId).emit('waiting-room-updated', room.waitingRoom);
+    }
+    
+    console.log(`  ✅ Approved - ${room.waitingRoom.length} still waiting`);
+  });
+  
+  // -------------------------------------------------------------------------
+  // DENY JOIN REQUEST
+  // -------------------------------------------------------------------------
+  socket.on('deny-join', (roomId, userId) => {
+    console.log(`\n❌ DENY: ${userId} → Room ${roomId}`);
+    
+    const room = getRoom(roomId);
+    if (!room) return;
+    
+    const waitingUser = room.waitingRoom.find(u => u.userId === userId);
+    if (!waitingUser) return;
+    
+    // Remove from waiting room and add to denied list
+    room.waitingRoom = room.waitingRoom.filter(u => u.userId !== userId);
+    room.deniedUsers.add(userId);
+    
+    // Send denial to user
+    io.to(waitingUser.socketId).emit('join-denied', 'The host denied your request to join');
+    
+    // Update waiting room list for creator
+    const creatorSocketId = userSockets.get(room.creatorId);
+    if (creatorSocketId) {
+      io.to(creatorSocketId).emit('waiting-room-updated', room.waitingRoom);
+    }
+    
+    console.log(`  ✅ Denied - ${room.waitingRoom.length} still waiting`);
+  });
+  
+  // -------------------------------------------------------------------------
+  // JOIN ROOM (After Approval)
+  // -------------------------------------------------------------------------
+  socket.on('join-room', (roomId, userId, userName, roomType = 'public') => {
+    console.log(`\n🏠 JOIN ROOM: ${userName} (${userId}) → Room ${roomId}`);
+    
+    // Join socket.io room
     socket.join(roomId);
     
-    // Track user's room
-    userToRoom[userId] = roomId;
+    // Get or create room
+    let room = getRoom(roomId);
+    let isNewRoom = false;
     
-    // Determine if user is creator
-    let isCreator = false;
-    if (!rooms[roomId]) {
-      // First person creates the room
-      rooms[roomId] = { participants: {} };
-      roomCreators[roomId] = userId;
-      isCreator = true;
-      console.log(`✓ User ${userName} (${userId}) CREATED room ${roomId}`);
-    } else {
-      // Check if returning creator
-      isCreator = roomCreators[roomId] === userId;
-      console.log(`✓ User ${userName} (${userId}) JOINED room ${roomId}`);
+    if (!room) {
+      room = createRoom(roomId, userId, userName, roomType);
+      isNewRoom = true;
     }
+    
+    const isCreator = room.creatorId === userId;
     
     // Add participant to room
-    rooms[roomId].participants[userId] = {
-      id: userId,
-      name: userName,
-      socketId: socket.id,
-      isCreator: isCreator,
+    addParticipant(roomId, userId, userName, socket.id);
+    
+    // Send creator status to joining user
+    socket.emit('creator-status', isCreator);
+    
+    // Get all participants
+    const allParticipants = getRoomParticipantsArray(roomId);
+    const existingParticipants = allParticipants.filter(p => p.userId !== userId);
+    
+    console.log(`  👥 Room has ${allParticipants.length} participants`);
+    
+    // Send all participants to joining user
+    socket.emit('all-participants', allParticipants);
+    
+    // Notify all others about new user
+    socket.to(roomId).emit('user-joined', {
+      userId,
+      userName,
+      isCreator,
       videoEnabled: true,
-      audioEnabled: true,
-      isScreenSharing: false
-    };
+      audioEnabled: true
+    });
     
-    // Tell the user if they're the creator
-    socket.emit('room-creator-status', isCreator);
+    // CRITICAL: Tell existing users to call the new user
+    existingParticipants.forEach(participant => {
+      console.log(`  📞 Telling ${participant.userName} to call ${userName}`);
+      io.to(participant.socketId).emit('call-user', {
+        targetUserId: userId,
+        targetUserName: userName
+      });
+    });
     
-    // Notify OTHER users in the room about new user
-    socket.to(roomId).emit('user-connected', userId, userName);
-    
-    // Send current participants to the joining user
-    socket.emit('room-participants', rooms[roomId].participants);
-    
-    // Update all users about participant list
-    io.to(roomId).emit('room-participants-updated', rooms[roomId].participants);
-    
-    // If this is a participant joining, notify the creator specifically
-    if (!isCreator && roomCreators[roomId]) {
-      const creatorId = roomCreators[roomId];
-      const creatorSocketId = rooms[roomId].participants[creatorId]?.socketId;
-      
-      if (creatorSocketId) {
-        console.log(`→ Notifying creator ${creatorId} about participant ${userId}`);
-        io.to(creatorSocketId).emit('participant-joined', userId, userName);
-        // Also tell creator to connect
-        io.to(creatorSocketId).emit('connect-to-participant', userId, userName);
-      }
-    }
-    
-    console.log(`Room ${roomId} now has ${Object.keys(rooms[roomId].participants).length} participants`);
+    console.log(`  ✅ ${userName} successfully joined room`);
   });
-
-  // CHECK CREATOR STATUS (separate event)
-  socket.on('check-creator-status', (roomId, userId) => {
-    const isCreator = roomCreators[roomId] === userId;
-    console.log(`Checking creator status for ${userId} in room ${roomId}: ${isCreator}`);
-    socket.emit('room-creator-status', isCreator);
-  });
-
-  // REQUEST CREATOR CONNECTION
-  socket.on('request-creator-connection', (roomId, userId, userName) => {
-    console.log(`User ${userName} (${userId}) requesting connection to creator`);
-    
-    if (rooms[roomId] && roomCreators[roomId]) {
-      const creatorId = roomCreators[roomId];
-      const creatorSocketId = rooms[roomId].participants[creatorId]?.socketId;
-      
-      if (creatorSocketId) {
-        console.log(`→ Telling creator ${creatorId} to connect to ${userId}`);
-        io.to(creatorSocketId).emit('connect-to-participant', userId, userName);
-      }
+  
+  // -------------------------------------------------------------------------
+  // GET WAITING ROOM LIST
+  // -------------------------------------------------------------------------
+  socket.on('get-waiting-room', (roomId) => {
+    const room = getRoom(roomId);
+    if (room) {
+      socket.emit('waiting-room-updated', room.waitingRoom);
     }
   });
-
-  // SEND MESSAGE
-  socket.on('send-message', (roomId, message, userId, userName, isFromCreator) => {
-    console.log(`Message from ${userName} in room ${roomId}: ${message}`);
-    
-    // Broadcast to everyone in the room (including sender for confirmation)
-    io.to(roomId).emit('receive-message', message, userId, userName, isFromCreator);
-    
-    // Save to database
-    try {
-      import('./models/meeting-model.js').then(({ default: Meeting }) => {
-        Meeting.findOne({ meetingId: roomId })
-          .then(meeting => {
-            if (meeting) {
-              meeting.messages.push({
-                sender: userId,
-                senderName: userName,
-                content: message,
-                isFromCreator: isFromCreator
-              });
-              meeting.save();
-            }
-          })
-          .catch(err => console.error("Error saving message:", err));
-      }).catch(err => console.error("Error importing Meeting model:", err));
-    } catch (error) {
-      console.error("Error handling message:", error);
+  
+  // -------------------------------------------------------------------------
+  // MEDIA CONTROLS
+  // -------------------------------------------------------------------------
+  socket.on('toggle-video', (roomId, userId, enabled) => {
+    const room = getRoom(roomId);
+    if (room && room.participants.has(userId)) {
+      const participant = room.participants.get(userId);
+      participant.videoEnabled = enabled;
+      socket.to(roomId).emit('participant-video-toggle', userId, enabled);
     }
   });
-
-  // MESSAGE HISTORY
-  socket.on('message-history', (roomId, targetUserId, messages) => {
-    io.to(targetUserId).emit('message-history', messages);
-  });
-
-  // TOGGLE VIDEO
-  socket.on('toggle-video', (roomId, userId, videoEnabled) => {
-    if (rooms[roomId]?.participants[userId]) {
-      rooms[roomId].participants[userId].videoEnabled = videoEnabled;
+  
+  socket.on('toggle-audio', (roomId, userId, enabled) => {
+    const room = getRoom(roomId);
+    if (room && room.participants.has(userId)) {
+      const participant = room.participants.get(userId);
+      participant.audioEnabled = enabled;
+      socket.to(roomId).emit('participant-audio-toggle', userId, enabled);
     }
-    socket.to(roomId).emit('user-toggle-video', userId, videoEnabled);
   });
-
-  // TOGGLE AUDIO
-  socket.on('toggle-audio', (roomId, userId, audioEnabled) => {
-    if (rooms[roomId]?.participants[userId]) {
-      rooms[roomId].participants[userId].audioEnabled = audioEnabled;
-    }
-    socket.to(roomId).emit('user-toggle-audio', userId, audioEnabled);
-  });
-
-  // SCREEN SHARE
+  
   socket.on('start-screen-share', (roomId, userId) => {
-    if (rooms[roomId]?.participants[userId]) {
-      rooms[roomId].participants[userId].isScreenSharing = true;
+    const room = getRoom(roomId);
+    if (room && room.participants.has(userId)) {
+      const participant = room.participants.get(userId);
+      participant.isScreenSharing = true;
+      socket.to(roomId).emit('participant-screen-share', userId, true);
     }
-    socket.to(roomId).emit('user-screen-share', userId, true);
   });
-
+  
   socket.on('stop-screen-share', (roomId, userId) => {
-    if (rooms[roomId]?.participants[userId]) {
-      rooms[roomId].participants[userId].isScreenSharing = false;
+    const room = getRoom(roomId);
+    if (room && room.participants.has(userId)) {
+      const participant = room.participants.get(userId);
+      participant.isScreenSharing = false;
+      socket.to(roomId).emit('participant-screen-share', userId, false);
     }
-    socket.to(roomId).emit('user-screen-share', userId, false);
   });
-
-  // WEBRTC SIGNALING
-  socket.on('signal', (toId, message) => {
-    io.to(toId).emit('signal', socket.id, message);
+  
+  // -------------------------------------------------------------------------
+  // CHAT MESSAGES
+  // -------------------------------------------------------------------------
+  socket.on('send-message', (roomId, message, userId, userName) => {
+    const room = getRoom(roomId);
+    if (!room) return;
+    
+    const isCreator = room.creatorId === userId;
+    
+    io.to(roomId).emit('receive-message', {
+      message,
+      userId,
+      userName,
+      isCreator,
+      timestamp: Date.now()
+    });
   });
-
-  // DISCONNECT - Single handler for all disconnects
+  
+  // -------------------------------------------------------------------------
+  // DISCONNECT
+  // -------------------------------------------------------------------------
   socket.on('disconnect', () => {
-    console.log(`Socket ${socket.id} disconnected`);
+    console.log(`\n🔌 Socket disconnected: ${socket.id}`);
     
-    // Find which user and room this socket belongs to
-    let disconnectedUserId = null;
-    let disconnectedRoomId = null;
+    const result = removeParticipant(socket.id);
     
-    // Search through all rooms to find this socket
-    for (const [roomId, room] of Object.entries(rooms)) {
-      for (const [userId, participant] of Object.entries(room.participants)) {
-        if (participant.socketId === socket.id) {
-          disconnectedUserId = userId;
-          disconnectedRoomId = roomId;
-          break;
-        }
-      }
-      if (disconnectedUserId) break;
-    }
-    
-    if (disconnectedUserId && disconnectedRoomId) {
-      const userName = rooms[disconnectedRoomId].participants[disconnectedUserId]?.name;
-      console.log(`User ${userName} (${disconnectedUserId}) left room ${disconnectedRoomId}`);
+    if (result && result.roomId) {
+      const { userId, roomId } = result;
+      const room = getRoom(roomId);
       
-      // Remove from room
-      delete rooms[disconnectedRoomId].participants[disconnectedUserId];
-      delete userToRoom[disconnectedUserId];
+      console.log(`  👤 User ${userId} left room ${roomId}`);
       
       // Notify others
-      io.to(disconnectedRoomId).emit('user-disconnected', disconnectedUserId);
-      io.to(disconnectedRoomId).emit('room-participants-updated', rooms[disconnectedRoomId].participants);
+      socket.to(roomId).emit('user-left', userId);
       
-      // Clean up empty room
-      if (Object.keys(rooms[disconnectedRoomId].participants).length === 0) {
-        console.log(`Room ${disconnectedRoomId} is empty, removing...`);
-        delete rooms[disconnectedRoomId];
-        delete roomCreators[disconnectedRoomId];
+      if (room) {
+        // Send updated participant list
+        io.to(roomId).emit('all-participants', getRoomParticipantsArray(roomId));
       }
+      
+      // Cleanup empty room
+      cleanupEmptyRoom(roomId);
     }
+  });
+  
+  // -------------------------------------------------------------------------
+  // ERROR HANDLING
+  // -------------------------------------------------------------------------
+  socket.on('error', (error) => {
+    console.error(`❌ Socket error on ${socket.id}:`, error);
   });
 });
 
-// Production setup
+// ============================================================================
+// SERVER STARTUP
+// ============================================================================
+
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '../dist')));
   app.get('*', (req, res) => {
@@ -248,6 +464,22 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 const PORT = process.env.PORT || 5000;
+
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`🚀 Server Status: RUNNING`);
+  console.log(`📡 Port: ${PORT}`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`✅ CORS Origins:`, allowedOrigins.length);
+  allowedOrigins.forEach(origin => console.log(`   - ${origin}`));
+  console.log(`${'='.repeat(60)}\n`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('\n⚠️  SIGTERM received, closing server...');
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
 });

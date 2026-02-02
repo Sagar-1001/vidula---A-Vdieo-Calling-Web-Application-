@@ -12,14 +12,15 @@ gsap.registerPlugin(ScrollTrigger);
 
 const Home = ({ userName, setUserName, isLoggedIn }) => {
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
-  
+  const [roomType, setRoomType] = useState('public'); 
+  const [showRoomTypeModal, setShowRoomTypeModal] = useState(false); 
   const [showJoinInput, setShowJoinInput] = useState(false);
   const [meetingCode, setMeetingCode] = useState('');
   const [joinError, setJoinError] = useState('');
   const [roomId, setRoomId] = useState('');
   const [isCreating, setIsCreating] = useState(true);
   const [showVideoMeet, setShowVideoMeet] = useState(false);
-  const [meetingAction, setMeetingAction] = useState(''); // 'create' or 'join'
+  const [meetingAction, setMeetingAction] = useState('');
   const navigate = useNavigate();
   const containerRef = useRef(null);
   const locomotiveScrollRef = useRef(null);
@@ -127,67 +128,70 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
     navigate(`/room/${targetRoomId}`);
   };
 
- const validateAndJoinMeeting = async () => {
-  setJoinError('');
-  
-  if (!meetingCode.trim()) {
-    setJoinError('Please enter a meeting code');
-    return;
-  }
-  
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!uuidRegex.test(meetingCode.trim())) {
-    setJoinError('Invalid meeting code. Please check and try again.');
-    return;
-  }
-  
-  try {
-    const token = localStorage.getItem('token');
-    let shouldProceed = true;
+  const validateAndJoinMeeting = async () => {
+    setJoinError('');
     
-    // Optional: Check with backend if meeting exists
-    if (token) {
-      try {
-      const response = await fetch(`${API_URL}/api/meetings/${meetingCode.trim()}/join`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          }
-        });
-        
-        const data = await response.json();
-        
-        if (!response.ok && response.status === 404) {
-          console.log("Meeting not found in database, but proceeding with valid UUID");
-        } else if (!response.ok) {
-          setJoinError(data.message || 'Failed to join meeting');
-          shouldProceed = false;
-        }
-      } catch (error) {
-        console.error("Error joining meeting via API:", error);
-        // Proceed anyway if backend is down
-      }
+    if (!meetingCode.trim()) {
+      setJoinError('Please enter a meeting code');
+      return;
     }
     
-    if (shouldProceed) {
-      // ✅ FIXED: Navigate to the room instead of showing modal
-      sessionStorage.setItem('isCreatingMeeting', 'false');
-      sessionStorage.setItem('joiningRoomId', meetingCode.trim());
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(meetingCode.trim())) {
+      setJoinError('Invalid meeting code. Please check and try again.');
+      return;
+    }
+    
+    try {
+      const token = localStorage.getItem('token');
+      let shouldProceed = true;
       
-      // Navigate to room URL - this will show the room ID in the URL
-      navigate(`/room/${meetingCode.trim()}`);
+      if (token) {
+        try {
+          const response = await fetch(`${API_URL}/api/meetings/${meetingCode.trim()}/join`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`
+            }
+          });
+          
+          const data = await response.json();
+          
+          if (!response.ok && response.status === 404) {
+            console.log("Meeting not found in database, but proceeding with valid UUID");
+          } else if (!response.ok) {
+            setJoinError(data.message || 'Failed to join meeting');
+            shouldProceed = false;
+          }
+        } catch (error) {
+          console.error("Error joining meeting via API:", error);
+        }
+      }
+      
+      if (shouldProceed) {
+        sessionStorage.setItem('isCreatingMeeting', 'false');
+        sessionStorage.setItem('joiningRoomId', meetingCode.trim());
+        navigate(`/room/${meetingCode.trim()}`);
+      }
+    } catch (error) {
+      console.error('Error joining meeting:', error);
+      setJoinError('Server error. Please try again later.');
     }
-  } catch (error) {
-    console.error('Error joining meeting:', error);
-    setJoinError('Server error. Please try again later.');
-  }
-};
+  };
 
- const handleCreateMeeting = async () => {
-  const newRoomId = uuidv4();
-  
-  if (isLoggedIn) {
+  const handleCreateMeeting = () => {
+    if (!isLoggedIn) {
+      document.querySelector('.navbar-signup-button')?.click();
+      return;
+    }
+    
+    setShowRoomTypeModal(true);
+  };
+
+  const createMeetingWithType = async (selectedRoomType) => {
+    const newRoomId = uuidv4();
+    
     try {
       const token = localStorage.getItem('token');
       
@@ -202,6 +206,7 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
             title: `Meeting by ${userName || 'User'}`,
             description: 'Video conference meeting',
             meetingId: newRoomId,
+            roomType: selectedRoomType,
             settings: {
               allowChat: true,
               allowScreenShare: true,
@@ -210,30 +215,20 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
           })
         });
         
-        const data = await response.json();
-        
-        if (!response.ok) {
-          console.error('Failed to create meeting in database:', data.message);
-        } else {
-          console.log('Meeting created successfully in database');
+        if (response.ok) {
+          console.log('Meeting created successfully');
         }
       }
     } catch (error) {
-      console.error('Error creating meeting in database:', error);
+      console.error('Error creating meeting:', error);
     }
-  } else {
-    // If not logged in, prompt user to sign up
-    document.querySelector('.navbar-signup-button')?.click();
-    return;
-  }
-  
-  // ✅ FIXED: Navigate to the room instead of showing modal
-  sessionStorage.setItem('isCreatingMeeting', 'true');
-  sessionStorage.setItem('createdRoomId', newRoomId);
-  
-  // Navigate to room URL - this will show the room ID in the URL
-  navigate(`/room/${newRoomId}`);
-};
+    
+    sessionStorage.setItem('isCreatingMeeting', 'true');
+    sessionStorage.setItem('createdRoomId', newRoomId);
+    sessionStorage.setItem('roomType', selectedRoomType);
+    
+    navigate(`/room/${newRoomId}`);
+  };
 
   const handleCloseVideoMeet = () => {
     setShowVideoMeet(false);
@@ -290,79 +285,79 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
                     alt="Online tutor concept illustration" 
                     className="w-full max-w-md border-4 shadow-lg rounded-3xl border-yellow-300/30"
                     style={{ filter: "hue-rotate(15deg) saturate(1.4) brightness(1.05)" }}
-              />
+                  />
                 </div>
-            </div>
+              </div>
             
               <div className="flex flex-col items-center w-full max-w-md mx-auto mt-10">
-              {!showJoinInput ? (
+                {!showJoinInput ? (
                   <div className="flex justify-center w-full gap-6 mb-8">
-                  <button 
-                    className="px-8 py-5 text-xl font-medium text-white transition-all duration-300 bg-red-600 rounded-lg shadow-lg action-button hover:bg-red-700"
-                    onClick={handleCreateMeeting}
-                  >
-                    New Meeting
-                  </button>
-                  <button 
-                    className="px-8 py-5 text-xl font-medium text-white transition-all duration-300 bg-gray-800 rounded-lg shadow-lg action-button hover:bg-gray-700"
-                    onClick={() => {
-                      if (isLoggedIn) {
-                        setShowJoinInput(true);
-                      } else {
-                        document.querySelector('.navbar-signup-button').click();
-                      }
-                    }}
-                  >
-                    Join Meeting
-                  </button>
-                </div>
-              ) : (
-                  <div className="w-full max-w-md p-6 mb-8 transition-all duration-300 border border-gray-200 rounded-lg shadow-lg bg-opacity-80 backdrop-blur-sm">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-xl font-medium text-gray-800">Join a Meeting</h3>
                     <button 
-                      onClick={() => {
-                        setShowJoinInput(false);
-                        setJoinError('');
-                        setMeetingCode('');
-                      }}
-                      className="text-gray-500 transition-colors duration-200 hover:text-gray-700"
+                      className="px-8 py-5 text-xl font-medium text-white transition-all duration-300 bg-red-600 rounded-lg shadow-lg action-button hover:bg-red-700"
+                      onClick={handleCreateMeeting}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
+                      New Meeting
                     </button>
-                  </div>
-                  <div className="mb-4">
-                    <input
-                      type="text"
-                      placeholder="Enter meeting code"
-                      className="w-full px-4 py-3 text-gray-800 bg-gray-100 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
-                      value={meetingCode}
-                      onChange={(e) => {
-                        setMeetingCode(e.target.value);
-                        setJoinError('');
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          validateAndJoinMeeting();
+                    <button 
+                      className="px-8 py-5 text-xl font-medium text-white transition-all duration-300 bg-gray-800 rounded-lg shadow-lg action-button hover:bg-gray-700"
+                      onClick={() => {
+                        if (isLoggedIn) {
+                          setShowJoinInput(true);
+                        } else {
+                          document.querySelector('.navbar-signup-button')?.click();
                         }
                       }}
-                    />
-                    {joinError && (
-                      <div className="mt-2 text-sm text-red-500">
-                        {joinError}
-                      </div>
-                    )}
+                    >
+                      Join Meeting
+                    </button>
                   </div>
-                  <button
-                    className="w-full py-3 font-medium text-white transition-colors duration-200 bg-red-600 rounded-md hover:bg-red-700"
-                    onClick={validateAndJoinMeeting}
-                  >
-                    Join
-                  </button>
-                </div>
-              )}
+                ) : (
+                  <div className="w-full max-w-md p-6 mb-8 transition-all duration-300 border border-gray-200 rounded-lg shadow-lg bg-opacity-80 backdrop-blur-sm">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-xl font-medium text-gray-800">Join a Meeting</h3>
+                      <button 
+                        onClick={() => {
+                          setShowJoinInput(false);
+                          setJoinError('');
+                          setMeetingCode('');
+                        }}
+                        className="text-gray-500 transition-colors duration-200 hover:text-gray-700"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                    <div className="mb-4">
+                      <input
+                        type="text"
+                        placeholder="Enter meeting code"
+                        className="w-full px-4 py-3 text-gray-800 bg-gray-100 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
+                        value={meetingCode}
+                        onChange={(e) => {
+                          setMeetingCode(e.target.value);
+                          setJoinError('');
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            validateAndJoinMeeting();
+                          }
+                        }}
+                      />
+                      {joinError && (
+                        <div className="mt-2 text-sm text-red-500">
+                          {joinError}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      className="w-full py-3 font-medium text-white transition-colors duration-200 bg-red-600 rounded-md hover:bg-red-700"
+                      onClick={validateAndJoinMeeting}
+                    >
+                      Join
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -381,7 +376,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
         <div className="container px-4 mx-auto">
           <div className="max-w-5xl mx-auto">
             
-           
             <div className="mb-32 creative-text-block" data-scroll data-scroll-speed="0.5">
               <style jsx>{`
                 @keyframes gradientAnimation {
@@ -451,7 +445,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
               </div>
             </div>
             
-            {/* Add device section */}
             <div className="mb-32 creative-text-block" data-scroll data-scroll-speed="0.4">
               <div className="flex flex-col items-center justify-between gap-8 md:flex-row">
                 <div className="md:w-1/2">
@@ -473,7 +466,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
               </div>
             </div>
             
-            {/* Add teamwork section */}
             <div className="mb-32 creative-text-block" data-scroll data-scroll-speed="0.4">
               <div className="flex flex-col items-center justify-between gap-8 md:flex-row-reverse">
                 <div className="md:w-1/2">
@@ -574,6 +566,68 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
           </div>
         </div>
       </footer>
+
+      {/* Room Type Selection Modal */}
+      {showRoomTypeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-75">
+          <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-2xl">
+            <h2 className="text-2xl font-bold mb-6 text-gray-800 text-center">
+              Choose Room Type
+            </h2>
+            
+            <div className="space-y-4 mb-6">
+              {/* Public Room Option */}
+              <button
+                onClick={() => {
+                  setShowRoomTypeModal(false);
+                  createMeetingWithType('public');
+                }}
+                className="w-full p-6 border-2 border-gray-200 rounded-xl hover:border-blue-500 hover:bg-blue-50 transition-all text-left group"
+              >
+                <div className="flex items-start gap-4">
+                  <div className="text-4xl">🌍</div>
+                  <div className="flex-1">
+                    <h3 className="text-lg font-bold text-gray-800 mb-2 group-hover:text-blue-600">
+                      Public Room
+                    </h3>
+                    <p className="text-sm text-gray-600">
+                      Anyone with the room link can join instantly. No approval needed.
+                    </p>
+                  </div>
+                </div>
+              </button>
+              
+              {/* Private Room Option */}
+              <button
+                onClick={() => {
+                  setShowRoomTypeModal(false);
+                  createMeetingWithType('private');
+                }}
+                className="w-full p-6 border-2 border-gray-200 rounded-xl hover:border-purple-500 hover:bg-purple-50 transition-all text-left group"
+              >
+                <div className="flex items-start gap-4">
+                  <div className="text-4xl">🔒</div>
+                  <div className="flex-1">
+                    <h3 className="text-lg font-bold text-gray-800 mb-2 group-hover:text-purple-600">
+                      Private Room
+                    </h3>
+                    <p className="text-sm text-gray-600">
+                      You control who joins. Participants wait for your approval before entering.
+                    </p>
+                  </div>
+                </div>
+              </button>
+            </div>
+            
+            <button
+              onClick={() => setShowRoomTypeModal(false)}
+              className="w-full py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

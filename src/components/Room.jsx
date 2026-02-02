@@ -1,41 +1,382 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import Peer from 'peerjs';
 import Controls from './Controls';
 import VideoGrid from './VideoGrid';
 import Participants from './Participants';
+import WaitingLobby from './WaitingLobby';
 
 const Room = ({ userName, onRoomEnter, onRoomExit }) => {
   const { roomId } = useParams();
   const navigate = useNavigate();
   
-  const [actualUserName, setActualUserName] = useState(userName || `Guest-${Math.floor(Math.random() * 10000)}`);
-  
-  useEffect(() => {
-    if (!userName) {
-      setActualUserName(`Guest-${Math.floor(Math.random() * 10000)}`);
-    }
-  }, [userName]);
-  
-  const [peers, setPeers] = useState({});
-  const [participants, setParticipants] = useState({});
-  const [messages, setMessages] = useState([]);
-  const [isChatOpen, setIsChatOpen] = useState(false);
-  const [isParticipantsOpen, setIsParticipantsOpen] = useState(false);
+  const [actualUserName] = useState(userName || `Guest-${Math.floor(Math.random() * 10000)}`);
   const [myStream, setMyStream] = useState(null);
+  const [screenStream, setScreenStream] = useState(null);
+  const [participants, setParticipants] = useState({});
+  const [peerStreams, setPeerStreams] = useState({});
+  const [messages, setMessages] = useState([]);
+  
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [screenStream, setScreenStream] = useState(null);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isParticipantsOpen, setIsParticipantsOpen] = useState(false);
   const [isRoomCreator, setIsRoomCreator] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
+  const [roomIdCopied, setRoomIdCopied] = useState(false);
   
-  const socketRef = useRef();
-  const myVideoRef = useRef();
-  const myPeerRef = useRef();
-  const myPeerId = useRef('');
-  const hasJoinedRoom = useRef(false); // ✅ NEW: Prevent duplicate joins
-  const connectedPeers = useRef(new Set()); // ✅ NEW: Track who we've connected to
+  const socketRef = useRef(null);
+  const peerRef = useRef(null);
+  const myPeerIdRef = useRef(null);
+  const myVideoRef = useRef(null);
+  const peerConnectionsRef = useRef({});
+  const streamRef = useRef(null);
+  const screenStreamRef = useRef(null);
+  const mountedRef = useRef(true);
+  
+  const copyRoomId = useCallback(() => {
+    navigator.clipboard.writeText(roomId)
+      .then(() => {
+        setRoomIdCopied(true);
+        setTimeout(() => setRoomIdCopied(false), 2000);
+      })
+      .catch(err => {
+        const textArea = document.createElement('textarea');
+        textArea.value = roomId;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        document.body.appendChild(textArea);
+        textArea.select();
+        try {
+          document.execCommand('copy');
+          setRoomIdCopied(true);
+          setTimeout(() => setRoomIdCopied(false), 2000);
+        } catch (err) {
+          console.error('Copy failed:', err);
+        }
+        document.body.removeChild(textArea);
+      });
+  }, [roomId]);
+  
+  const cleanup = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
+      screenStreamRef.current = null;
+    }
+    
+    Object.entries(peerConnectionsRef.current).forEach(([userId, connection]) => {
+      try {
+        connection.close();
+      } catch (e) {}
+    });
+    peerConnectionsRef.current = {};
+    
+    if (peerRef.current) {
+      try {
+        peerRef.current.destroy();
+      } catch (e) {}
+      peerRef.current = null;
+    }
+    
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    
+    sessionStorage.removeItem('isCreatingMeeting');
+    sessionStorage.removeItem('roomType');
+    sessionStorage.removeItem('createdRoomId');
+  }, []);
+  
+  const addPeerStream = useCallback((userId, stream) => {
+    if (!mountedRef.current) return;
+    
+    setPeerStreams(prev => {
+      return { ...prev, [userId]: stream };
+    });
+  }, []);
+  
+  const removePeerStream = useCallback((userId) => {
+    if (!mountedRef.current) return;
+    
+    setPeerStreams(prev => {
+      const newStreams = { ...prev };
+      delete newStreams[userId];
+      return newStreams;
+    });
+    
+    if (peerConnectionsRef.current[userId]) {
+      try {
+        peerConnectionsRef.current[userId].close();
+      } catch (e) {}
+      delete peerConnectionsRef.current[userId];
+    }
+  }, []);
+  
+  const callUser = useCallback((targetUserId, targetUserName) => {
+    if (!peerRef.current || !streamRef.current) {
+      return;
+    }
+    
+    if (peerConnectionsRef.current[targetUserId]) {
+      return;
+    }
+    
+    try {
+      const call = peerRef.current.call(targetUserId, streamRef.current);
+      
+      if (!call) {
+        return;
+      }
+      
+      peerConnectionsRef.current[targetUserId] = call;
+      
+      call.on('stream', (remoteStream) => {
+        addPeerStream(targetUserId, remoteStream);
+      });
+      
+      call.on('close', () => {
+        removePeerStream(targetUserId);
+      });
+      
+      call.on('error', (error) => {
+        removePeerStream(targetUserId);
+      });
+      
+    } catch (error) {}
+  }, [addPeerStream, removePeerStream]);
+  
+  useEffect(() => {
+    const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
+    mountedRef.current = true;
+    
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      .then(stream => {
+        if (!mountedRef.current) {
+          stream.getTracks().forEach(track => track.stop());
+          return;
+        }
+        
+        streamRef.current = stream;
+        setMyStream(stream);
+        
+        if (myVideoRef.current) {
+          myVideoRef.current.srcObject = stream;
+        }
+        
+        const peer = new Peer(undefined, {
+          host: '0.peerjs.com',
+          port: 443,
+          path: '/',
+          secure: true,
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' },
+              { urls: 'stun:stun3.l.google.com:19302' },
+              { urls: 'stun:stun4.l.google.com:19302' }
+            ],
+            sdpSemantics: 'unified-plan'
+          }
+        });
+        
+        peerRef.current = peer;
+        
+        peer.on('open', (peerId) => {
+          if (!mountedRef.current) return;
+          
+          myPeerIdRef.current = peerId;
+          
+          const socket = io(SOCKET_URL, {
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000,
+            timeout: 20000
+          });
+          
+          socketRef.current = socket;
+          
+          socket.on('connect', () => {
+            if (!mountedRef.current) return;
+            
+            setConnectionStatus('connected');
+            
+            const isCreating = sessionStorage.getItem('isCreatingMeeting') === 'true';
+            const roomType = sessionStorage.getItem('roomType') || 'public';
+            
+            if (isCreating) {
+              socket.emit('join-room', roomId, peerId, actualUserName, roomType);
+            } else {
+              socket.emit('request-join-room', roomId, peerId, actualUserName);
+            }
+          });
+          
+          socket.on('connect_error', (error) => {
+            setConnectionStatus('failed');
+          });
+          
+          socket.on('join-approved', (approvedRoomId) => {
+            if (!mountedRef.current) return;
+            setConnectionStatus('connected');
+            socket.emit('join-room', approvedRoomId, peerId, actualUserName, 'public');
+          });
+          
+          socket.on('join-denied', (message) => {
+            alert(message || 'The host denied your request to join');
+            cleanup();
+            navigate('/');
+          });
+          
+          socket.on('waiting-for-approval', (message) => {
+            if (!mountedRef.current) return;
+            setConnectionStatus('waiting');
+          });
+          
+          socket.on('creator-status', (isCreator) => {
+            if (!mountedRef.current) return;
+            setIsRoomCreator(isCreator);
+          });
+          
+          socket.on('all-participants', (participantsList) => {
+            if (!mountedRef.current) return;
+            
+            const participantsObj = {};
+            participantsList.forEach(p => {
+              participantsObj[p.userId] = p;
+            });
+            setParticipants(participantsObj);
+          });
+          
+          socket.on('user-joined', (userData) => {
+            if (!mountedRef.current) return;
+            
+            setParticipants(prev => ({
+              ...prev,
+              [userData.userId]: userData
+            }));
+          });
+          
+          socket.on('call-user', ({ targetUserId, targetUserName }) => {
+            if (!mountedRef.current) return;
+            
+            setTimeout(() => {
+              if (mountedRef.current) {
+                callUser(targetUserId, targetUserName);
+              }
+            }, 1000);
+          });
+          
+          socket.on('user-left', (userId) => {
+            if (!mountedRef.current) return;
+            
+            removePeerStream(userId);
+            
+            setParticipants(prev => {
+              const newParticipants = { ...prev };
+              delete newParticipants[userId];
+              return newParticipants;
+            });
+          });
+          
+          socket.on('participant-video-toggle', (userId, enabled) => {
+            if (!mountedRef.current) return;
+            setParticipants(prev => ({
+              ...prev,
+              [userId]: { ...prev[userId], videoEnabled: enabled }
+            }));
+          });
+          
+          socket.on('participant-audio-toggle', (userId, enabled) => {
+            if (!mountedRef.current) return;
+            setParticipants(prev => ({
+              ...prev,
+              [userId]: { ...prev[userId], audioEnabled: enabled }
+            }));
+          });
+          
+          socket.on('participant-screen-share', (userId, isSharing) => {
+            if (!mountedRef.current) return;
+            setParticipants(prev => ({
+              ...prev,
+              [userId]: { ...prev[userId], isScreenSharing: isSharing }
+            }));
+          });
+          
+          socket.on('receive-message', (messageData) => {
+            if (!mountedRef.current) return;
+            setMessages(prev => {
+              const isDuplicate = prev.some(msg =>
+                msg.userId === messageData.userId &&
+                msg.message === messageData.message &&
+                Math.abs(msg.timestamp - messageData.timestamp) < 2000
+              );
+              
+              if (isDuplicate) return prev;
+              
+              return [...prev, {
+                id: `${messageData.timestamp}-${messageData.userId}`,
+                ...messageData
+              }];
+            });
+          });
+          
+          socket.on('disconnect', (reason) => {
+            setConnectionStatus('disconnected');
+          });
+        });
+        
+        peer.on('call', (call) => {
+          if (!mountedRef.current) return;
+          
+          call.answer(streamRef.current);
+          
+          peerConnectionsRef.current[call.peer] = call;
+          
+          call.on('stream', (remoteStream) => {
+            if (!mountedRef.current) return;
+            addPeerStream(call.peer, remoteStream);
+          });
+          
+          call.on('close', () => {
+            removePeerStream(call.peer);
+          });
+          
+          call.on('error', (error) => {
+            removePeerStream(call.peer);
+          });
+        });
+        
+        peer.on('error', (error) => {
+          if (error.type === 'network') {
+            setConnectionStatus('failed');
+          }
+        });
+        
+        peer.on('close', () => {});
+        
+        peer.on('disconnected', () => {});
+        
+      })
+      .catch(error => {
+        alert('Cannot access camera/microphone. Please check permissions and try again.');
+        setConnectionStatus('failed');
+        navigate('/');
+      });
+    
+    return () => {
+      mountedRef.current = false;
+      cleanup();
+    };
+  }, [roomId, actualUserName, navigate, callUser, addPeerStream, removePeerStream, cleanup]);
   
   useEffect(() => {
     if (onRoomEnter) onRoomEnter();
@@ -44,361 +385,60 @@ const Room = ({ userName, onRoomEnter, onRoomExit }) => {
     };
   }, [onRoomEnter, onRoomExit]);
   
-  useEffect(() => {
-    // ✅ Prevent duplicate execution in React Strict Mode
-    if (hasJoinedRoom.current) return;
-    hasJoinedRoom.current = true;
+  const toggleAudio = useCallback(() => {
+    if (!streamRef.current) return;
     
-   const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
-
-  socketRef.current = io(SOCKET_URL, {
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000
-    });
-    
-    navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true
-    }).then(stream => {
-      setMyStream(stream);
+    const audioTrack = streamRef.current.getAudioTracks()[0];
+    if (audioTrack) {
+      audioTrack.enabled = !audioTrack.enabled;
+      setIsAudioEnabled(audioTrack.enabled);
       
-      if (myVideoRef.current) {
-        myVideoRef.current.srcObject = stream;
-      }
-      
-      const peer = new Peer(undefined, {
-        host: '0.peerjs.com',
-        port: 443,
-        path: '/',
-        secure: true,
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' }
-          ]
-        }
-      });
-      
-      myPeerRef.current = peer;
-      
-      peer.on('open', (id) => {
-        myPeerId.current = id;
-        console.log("✓ My peer ID:", id);
-        
-        // Join room
-        socketRef.current.emit('join-room', roomId, id, actualUserName);
-      });
-      
-      // Handle incoming calls
-      peer.on('call', (call) => {
-        console.log(`← Receiving call from: ${call.peer}`);
-        
-        // ✅ FIX: Don't answer calls from yourself!
-        if (call.peer === myPeerId.current) {
-          console.log('⚠️ Ignoring call from self');
-          return;
-        }
-        
-        call.answer(stream);
-        
-        call.on('stream', (remoteStream) => {
-          console.log(`✓ Received stream from: ${call.peer}`);
-          
-          // ✅ FIX: Don't add yourself to peers
-          if (call.peer !== myPeerId.current) {
-            setPeers(prevPeers => ({
-              ...prevPeers,
-              [call.peer]: remoteStream
-            }));
-          }
-        });
-        
-        call.on('close', () => {
-          console.log(`✗ Call closed with: ${call.peer}`);
-          setPeers(prevPeers => {
-            const newPeers = { ...prevPeers };
-            delete newPeers[call.peer];
-            return newPeers;
-          });
-          connectedPeers.current.delete(call.peer);
-        });
-        
-        call.on('error', (err) => {
-          console.error(`Call error:`, err);
-          connectedPeers.current.delete(call.peer);
-        });
-      });
-      
-      // ✅ FIXED: Connection logic with self-check
-      const connectToUser = (userId, stream, attempt = 1) => {
-        // ✅ CRITICAL: Don't connect to yourself!
-        if (userId === myPeerId.current) {
-          console.log('⚠️ Skipping connection to self');
-          return;
-        }
-        
-        // ✅ Don't connect if already connected
-        if (connectedPeers.current.has(userId)) {
-          console.log(`⚠️ Already connected to ${userId}`);
-          return;
-        }
-        
-        if (attempt > 3) {
-          console.error(`Failed to connect to ${userId} after 3 attempts`);
-          return;
-        }
-        
-        console.log(`→ Connecting to ${userId} (attempt ${attempt})`);
-        
-        try {
-          const call = myPeerRef.current.call(userId, stream);
-          
-          if (!call) {
-            console.log(`Call failed, retrying in ${attempt}s...`);
-            setTimeout(() => connectToUser(userId, stream, attempt + 1), attempt * 1000);
-            return;
-          }
-          
-          console.log(`✓ Call created to ${userId}`);
-          connectedPeers.current.add(userId); // Mark as connected
-          
-          call.on('stream', (remoteStream) => {
-            console.log(`✓ Received stream from ${userId}`);
-            
-            // ✅ FIX: Double-check not adding self
-            if (userId !== myPeerId.current) {
-              setPeers(prevPeers => ({
-                ...prevPeers,
-                [userId]: remoteStream
-              }));
-            }
-          });
-          
-          call.on('close', () => {
-            console.log(`✗ Call closed with ${userId}`);
-            setPeers(prevPeers => {
-              const newPeers = { ...prevPeers };
-              delete newPeers[userId];
-              return newPeers;
-            });
-            connectedPeers.current.delete(userId);
-          });
-          
-          call.on('error', (err) => {
-            console.error(`Call error with ${userId}:`, err);
-            connectedPeers.current.delete(userId);
-            setTimeout(() => connectToUser(userId, stream, attempt + 1), attempt * 1000);
-          });
-          
-        } catch (err) {
-          console.error(`Error calling ${userId}:`, err);
-          connectedPeers.current.delete(userId);
-          setTimeout(() => connectToUser(userId, stream, attempt + 1), attempt * 1000);
-        }
-      };
-      
-      // Socket event handlers
-      socketRef.current.on('room-creator-status', (isCreator) => {
-        console.log("✓ Server says I am creator:", isCreator);
-        setIsRoomCreator(Boolean(isCreator));
-      });
-      
-      socketRef.current.on('user-connected', (userId, userName) => {
-        console.log(`✓ User connected: ${userName} (${userId})`);
-        
-        // ✅ FIX: Don't connect to yourself
-        if (userId === myPeerId.current) {
-          console.log('⚠️ Ignoring user-connected event for self');
-          return;
-        }
-        
-        if (stream && myPeerRef.current) {
-          connectToUser(userId, stream);
-        }
-      });
-      
-      socketRef.current.on('participant-joined', (userId, userName) => {
-        console.log(`✓ Participant joined: ${userName} (${userId})`);
-        
-        // ✅ FIX: Don't connect to yourself
-        if (userId === myPeerId.current) {
-          console.log('⚠️ Ignoring participant-joined event for self');
-          return;
-        }
-        
-        if (stream && myPeerRef.current) {
-          connectToUser(userId, stream);
-        }
-      });
-      
-      socketRef.current.on('connect-to-participant', (userId, userName) => {
-        console.log(`✓ Connecting to participant: ${userName} (${userId})`);
-        
-        // ✅ FIX: Don't connect to yourself
-        if (userId === myPeerId.current) {
-          console.log('⚠️ Ignoring connect-to-participant event for self');
-          return;
-        }
-        
-        if (stream && myPeerRef.current) {
-          connectToUser(userId, stream);
-        }
-      });
-      
-      socketRef.current.on('user-disconnected', (userId) => {
-        console.log(`✗ User disconnected: ${userId}`);
-        
-        setPeers(prevPeers => {
-          const newPeers = { ...prevPeers };
-          delete newPeers[userId];
-          return newPeers;
-        });
-        
-        setParticipants(prevParticipants => {
-          const newParticipants = { ...prevParticipants };
-          delete newParticipants[userId];
-          return newParticipants;
-        });
-        
-        connectedPeers.current.delete(userId);
-      });
-      
-      socketRef.current.on('room-participants', (roomParticipants) => {
-        console.log('📋 Room participants:', roomParticipants);
-        setParticipants(roomParticipants);
-      });
-      
-      socketRef.current.on('room-participants-updated', (roomParticipants) => {
-        console.log('📋 Participants updated:', roomParticipants);
-        setParticipants(roomParticipants);
-      });
-      
-      socketRef.current.on('receive-message', (message, userId, userName, isFromCreator) => {
-        console.log(`Message from ${userName}: ${message}`);
-        
-        setMessages(prevMessages => {
-          const isDuplicate = prevMessages.some(msg => 
-            msg.userId === userId && 
-            msg.message === message && 
-            (new Date().getTime() - new Date(msg.timestamp).getTime() < 2000)
-          );
-          
-          if (isDuplicate) {
-            return prevMessages;
-          }
-          
-          return [
-            ...prevMessages,
-            {
-              id: Date.now() + Math.random(),
-              message,
-              userId,
-              userName,
-              timestamp: new Date().toISOString(),
-              isFromCreator
-            }
-          ];
-        });
-      });
-      
-      socketRef.current.on('user-toggle-video', (userId, videoEnabled) => {
-        setParticipants(prevParticipants => ({
-          ...prevParticipants,
-          [userId]: {
-            ...prevParticipants[userId],
-            videoEnabled
-          }
-        }));
-      });
-      
-      socketRef.current.on('user-toggle-audio', (userId, audioEnabled) => {
-        setParticipants(prevParticipants => ({
-          ...prevParticipants,
-          [userId]: {
-            ...prevParticipants[userId],
-            audioEnabled
-          }
-        }));
-      });
-      
-      socketRef.current.on('user-screen-share', (userId, isSharing) => {
-        setParticipants(prevParticipants => ({
-          ...prevParticipants,
-          [userId]: {
-            ...prevParticipants[userId],
-            isScreenSharing: isSharing
-          }
-        }));
-      });
-      
-    }).catch(error => {
-      console.error('Error accessing media devices:', error);
-      alert('Failed to access camera/microphone. Please check permissions.');
-    });
-    
-    // Cleanup
-    return () => {
-      if (myStream) {
-        myStream.getTracks().forEach(track => track.stop());
-      }
-      if (screenStream) {
-        screenStream.getTracks().forEach(track => track.stop());
-      }
-      if (myPeerRef.current) {
-        myPeerRef.current.destroy();
-      }
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
-      hasJoinedRoom.current = false;
-      connectedPeers.current.clear();
-    };
-  }, [roomId, actualUserName, navigate]);
-  
-  const toggleAudio = () => {
-    if (myStream) {
-      const audioTrack = myStream.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsAudioEnabled(audioTrack.enabled);
-        socketRef.current.emit('toggle-audio', roomId, myPeerId.current, audioTrack.enabled);
+      if (socketRef.current && myPeerIdRef.current) {
+        socketRef.current.emit('toggle-audio', roomId, myPeerIdRef.current, audioTrack.enabled);
       }
     }
-  };
+  }, [roomId]);
   
-  const toggleVideo = () => {
-    if (myStream) {
-      const videoTrack = myStream.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        setIsVideoEnabled(videoTrack.enabled);
-        socketRef.current.emit('toggle-video', roomId, myPeerId.current, videoTrack.enabled);
+  const toggleVideo = useCallback(() => {
+    if (!streamRef.current) return;
+    
+    const videoTrack = streamRef.current.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.enabled = !videoTrack.enabled;
+      setIsVideoEnabled(videoTrack.enabled);
+      
+      if (socketRef.current && myPeerIdRef.current) {
+        socketRef.current.emit('toggle-video', roomId, myPeerIdRef.current, videoTrack.enabled);
       }
     }
-  };
+  }, [roomId]);
   
-  const toggleScreenShare = async () => {
+  const toggleScreenShare = useCallback(async () => {
     if (!isScreenSharing) {
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: true
+        const stream = await navigator.mediaDevices.getDisplayMedia({ 
+          video: { cursor: 'always' },
+          audio: false
         });
         
+        screenStreamRef.current = stream;
         setScreenStream(stream);
-        const videoTrack = stream.getVideoTracks()[0];
         
-        const senders = myPeerRef.current.connections;
-        Object.values(senders).forEach(sender => {
-          sender.forEach(s => {
-            s.peerConnection.getSenders().forEach(rtpSender => {
-              if (rtpSender.track && rtpSender.track.kind === 'video') {
-                rtpSender.replaceTrack(videoTrack);
-              }
-            });
-          });
+        const screenTrack = stream.getVideoTracks()[0];
+        
+        const originalVideoTrack = streamRef.current.getVideoTracks()[0];
+        
+        Object.values(peerConnectionsRef.current).forEach(connection => {
+          try {
+            const sender = connection.peerConnection
+              .getSenders()
+              .find(s => s.track && s.track.kind === 'video');
+            
+            if (sender) {
+              sender.replaceTrack(screenTrack)
+                .catch(e => {});
+            }
+          } catch (e) {}
         });
         
         if (myVideoRef.current) {
@@ -406,109 +446,128 @@ const Room = ({ userName, onRoomEnter, onRoomExit }) => {
         }
         
         setIsScreenSharing(true);
-        socketRef.current.emit('start-screen-share', roomId, myPeerId.current);
         
-        videoTrack.onended = () => {
-          stopScreenShare();
+        if (socketRef.current && myPeerIdRef.current) {
+          socketRef.current.emit('start-screen-share', roomId, myPeerIdRef.current);
+        }
+        
+        screenTrack.onended = () => {
+          stopScreenShare(originalVideoTrack);
         };
+        
       } catch (error) {
-        console.error('Error sharing screen:', error);
+        if (error.name !== 'NotAllowedError') {
+          alert('Failed to share screen. Please try again.');
+        }
       }
     } else {
-      stopScreenShare();
+      const originalVideoTrack = streamRef.current.getVideoTracks()[0];
+      stopScreenShare(originalVideoTrack);
     }
-  };
+  }, [isScreenSharing, roomId]);
   
-  const stopScreenShare = () => {
-    if (screenStream) {
-      screenStream.getTracks().forEach(track => track.stop());
-      setScreenStream(null);
+  const stopScreenShare = useCallback((originalVideoTrack) => {
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
+      screenStreamRef.current = null;
     }
+    setScreenStream(null);
     
-    if (myStream) {
-      const videoTrack = myStream.getVideoTracks()[0];
-      const senders = myPeerRef.current.connections;
-      
-      Object.values(senders).forEach(sender => {
-        sender.forEach(s => {
-          s.peerConnection.getSenders().forEach(rtpSender => {
-            if (rtpSender.track && rtpSender.track.kind === 'video') {
-              rtpSender.replaceTrack(videoTrack);
-            }
-          });
-        });
+    if (streamRef.current && originalVideoTrack) {
+      Object.values(peerConnectionsRef.current).forEach(connection => {
+        try {
+          const sender = connection.peerConnection
+            .getSenders()
+            .find(s => s.track && s.track.kind === 'video');
+          
+          if (sender) {
+            sender.replaceTrack(originalVideoTrack)
+              .catch(e => {});
+          }
+        } catch (e) {}
       });
       
       if (myVideoRef.current) {
-        myVideoRef.current.srcObject = myStream;
+        myVideoRef.current.srcObject = streamRef.current;
       }
     }
     
     setIsScreenSharing(false);
-    socketRef.current.emit('stop-screen-share', roomId, myPeerId.current);
-  };
+    
+    if (socketRef.current && myPeerIdRef.current) {
+      socketRef.current.emit('stop-screen-share', roomId, myPeerIdRef.current);
+    }
+  }, [roomId]);
   
-  const sendMessage = (message) => {
-    if (message.trim() && socketRef.current) {
-      console.log("Sending message:", message);
-      socketRef.current.emit('send-message', roomId, message, myPeerId.current, actualUserName, isRoomCreator);
-    }
-  };
+  const sendMessage = useCallback((message) => {
+    if (!message.trim() || !socketRef.current || !myPeerIdRef.current) return;
+    
+    socketRef.current.emit('send-message', roomId, message, myPeerIdRef.current, actualUserName);
+  }, [roomId, actualUserName]);
   
-  const leaveMeeting = () => {
-    if (myStream) {
-      myStream.getTracks().forEach(track => track.stop());
-    }
-    if (screenStream) {
-      screenStream.getTracks().forEach(track => track.stop());
-    }
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-    }
-    if (myPeerRef.current) {
-      myPeerRef.current.destroy();
-    }
+  const leaveMeeting = useCallback(() => {
+    cleanup();
     navigate('/');
-  };
+  }, [navigate, cleanup]);
   
-  const toggleChat = () => {
+  const toggleChat = useCallback(() => {
     setIsChatOpen(prev => !prev);
-    if (!isChatOpen) {
-      setIsParticipantsOpen(false);
-    }
-  };
+    setIsParticipantsOpen(false);
+  }, []);
   
-  const toggleParticipants = () => {
+  const toggleParticipants = useCallback(() => {
     setIsParticipantsOpen(prev => !prev);
-    if (!isParticipantsOpen) {
-      setIsChatOpen(false);
-    }
-  };
+    setIsChatOpen(false);
+  }, []);
   
   return (
     <div className="flex flex-col h-screen bg-black">
-      <div className="flex items-center justify-between px-4 py-2 text-white bg-black">
-        <div className="flex items-center">
+      <WaitingLobby 
+        socketRef={socketRef} 
+        isCreator={isRoomCreator} 
+        roomId={roomId}
+        onDenied={leaveMeeting}
+      />
+      
+      <div className="flex items-center justify-between px-4 py-2 text-white bg-black border-b border-gray-800">
+        <div className="flex items-center gap-3">
           <div className="w-8 h-8">
-            <img src="/vidula-new-logo.svg" alt="Vidula Logo" className="object-contain w-full h-full" />
+            <img src="/vidula-new-logo.svg" alt="Vidula" className="object-contain w-full h-full" />
           </div>
-          <span className="mx-2 text-gray-500">|</span>
-          <span className="text-sm text-gray-300">Room ID: {roomId}</span>
+          <span className="text-gray-500">|</span>
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-gray-300 font-mono">{roomId}</span>
+            <button
+              onClick={copyRoomId}
+              className="px-2 py-1 text-xs font-medium text-white transition-colors bg-gray-700 rounded hover:bg-gray-600"
+              title="Copy Room ID"
+            >
+              {roomIdCopied ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+          <span className={`ml-2 px-2 py-1 text-xs rounded-full ${
+            connectionStatus === 'connected' ? 'bg-green-600' :
+            connectionStatus === 'connecting' ? 'bg-yellow-600' :
+            connectionStatus === 'waiting' ? 'bg-blue-600' :
+            'bg-red-600'
+          }`}>
+            {connectionStatus}
+          </span>
         </div>
         <div className="text-sm">
-          <span>{Object.keys(participants).length} participants</span>
+          <span>{Object.keys(participants).length} participant{Object.keys(participants).length !== 1 ? 's' : ''}</span>
         </div>
       </div>
       
       <div className="relative flex flex-1 overflow-hidden">
         <div className="flex flex-col flex-1 overflow-hidden">
           <VideoGrid 
-            peers={peers} 
+            peers={peerStreams}
             myStream={myStream} 
             myVideoRef={myVideoRef} 
             isScreenSharing={isScreenSharing} 
             userName={actualUserName} 
-            myPeerId={myPeerId.current} 
+            myPeerId={myPeerIdRef.current} 
             participants={participants}
             isRoomCreator={isRoomCreator} 
           />
@@ -518,7 +577,7 @@ const Room = ({ userName, onRoomEnter, onRoomExit }) => {
           <div className="w-80 bg-[#1a1a1a] border-l border-[#333] overflow-y-auto">
             <Participants 
               participants={participants} 
-              currentUserId={myPeerId.current} 
+              currentUserId={myPeerIdRef.current} 
             />
           </div>
         )}
@@ -544,11 +603,11 @@ const Room = ({ userName, onRoomEnter, onRoomExit }) => {
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
-              padding: '10px 15px',
+              padding: '12px 16px',
               borderBottom: '1px solid #333',
               backgroundColor: '#1a1a1a'
             }}>
-              <h2 style={{ margin: 0, fontSize: '18px', color: 'white' }}>Chat</h2>
+              <h2 style={{ margin: 0, fontSize: '18px', color: 'white', fontWeight: '600' }}>Chat</h2>
               <button 
                 onClick={() => setIsChatOpen(false)}
                 style={{
@@ -556,29 +615,32 @@ const Room = ({ userName, onRoomEnter, onRoomExit }) => {
                   color: 'white',
                   border: 'none',
                   borderRadius: '50%',
-                  width: '30px',
-                  height: '30px',
+                  width: '32px',
+                  height: '32px',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  cursor: 'pointer'
+                  cursor: 'pointer',
+                  transition: 'background-color 0.2s'
                 }}
+                onMouseOver={(e) => e.target.style.backgroundColor = '#b91c1c'}
+                onMouseOut={(e) => e.target.style.backgroundColor = '#dc2626'}
               >
-                <span style={{ fontSize: '18px' }}>&times;</span>
+                ×
               </button>
             </div>
             
             <div style={{
               flex: 1,
               overflowY: 'auto',
-              padding: '15px',
+              padding: '16px',
               color: 'white'
             }}>
               {messages.length === 0 ? (
                 <div style={{ textAlign: 'center', marginTop: '50px', color: '#9ca3af' }}>
-                  <p>No messages yet</p>
-                  <p style={{ marginTop: '8px', fontSize: '14px' }}>
-                    Messages sent here are only seen<br />by people in the call
+                  <p style={{ fontSize: '16px', marginBottom: '8px' }}>No messages yet</p>
+                  <p style={{ fontSize: '14px' }}>
+                    Start a conversation with other participants
                   </p>
                 </div>
               ) : (
@@ -586,25 +648,34 @@ const Room = ({ userName, onRoomEnter, onRoomExit }) => {
                   <div 
                     key={msg.id} 
                     style={{
-                      textAlign: msg.userId === myPeerId.current ? 'right' : 'left',
-                      marginBottom: '10px'
+                      textAlign: msg.userId === myPeerIdRef.current ? 'right' : 'left',
+                      marginBottom: '12px'
                     }}
                   >
-                    {msg.userId !== myPeerId.current && (
-                      <div style={{ fontSize: '14px', marginBottom: '4px', color: '#d1d5db' }}>
+                    {msg.userId !== myPeerIdRef.current && (
+                      <div style={{ 
+                        fontSize: '13px', 
+                        marginBottom: '4px', 
+                        color: '#d1d5db',
+                        fontWeight: '500'
+                      }}>
                         {msg.userName}
                       </div>
                     )}
                     <div style={{
                       display: 'inline-block',
-                      backgroundColor: msg.userId === myPeerId.current ? '#2563eb' : '#374151',
-                      padding: '8px 12px',
-                      borderRadius: '8px',
-                      maxWidth: '80%'
+                      backgroundColor: msg.userId === myPeerIdRef.current ? '#2563eb' : '#374151',
+                      padding: '10px 14px',
+                      borderRadius: '12px',
+                      maxWidth: '75%',
+                      wordWrap: 'break-word'
                     }}>
-                      {msg.message}
-                      <div style={{ fontSize: '12px', marginTop: '4px', opacity: 0.7 }}>
-                        {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      <div style={{ fontSize: '14px', lineHeight: '1.5' }}>{msg.message}</div>
+                      <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.7 }}>
+                        {new Date(msg.timestamp).toLocaleTimeString([], { 
+                          hour: '2-digit', 
+                          minute: '2-digit' 
+                        })}
                       </div>
                     </div>
                   </div>
@@ -613,7 +684,7 @@ const Room = ({ userName, onRoomEnter, onRoomExit }) => {
             </div>
             
             <div style={{
-              padding: '10px 15px',
+              padding: '12px 16px',
               borderTop: '1px solid #333',
               backgroundColor: '#1a1a1a'
             }}>
@@ -633,16 +704,19 @@ const Room = ({ userName, onRoomEnter, onRoomExit }) => {
                   name="messageInput"
                   type="text"
                   placeholder="Type a message..."
+                  autoComplete="off"
                   style={{
                     flex: 1,
                     backgroundColor: '#374151',
                     color: 'white',
                     border: '1px solid #4b5563',
-                    borderRadius: '4px',
-                    padding: '8px 12px',
+                    borderRadius: '6px',
+                    padding: '10px 12px',
                     outline: 'none',
-                    height: '40px'
+                    fontSize: '14px'
                   }}
+                  onFocus={(e) => e.target.style.borderColor = '#2563eb'}
+                  onBlur={(e) => e.target.style.borderColor = '#4b5563'}
                 />
                 <button 
                   type="submit"
@@ -650,10 +724,15 @@ const Room = ({ userName, onRoomEnter, onRoomExit }) => {
                     backgroundColor: '#2563eb',
                     color: 'white',
                     border: 'none',
-                    borderRadius: '4px',
-                    padding: '8px 16px',
-                    cursor: 'pointer'
+                    borderRadius: '6px',
+                    padding: '10px 20px',
+                    cursor: 'pointer',
+                    fontWeight: '500',
+                    fontSize: '14px',
+                    transition: 'background-color 0.2s'
                   }}
+                  onMouseOver={(e) => e.target.style.backgroundColor = '#1d4ed8'}
+                  onMouseOut={(e) => e.target.style.backgroundColor = '#2563eb'}
                 >
                   Send
                 </button>
