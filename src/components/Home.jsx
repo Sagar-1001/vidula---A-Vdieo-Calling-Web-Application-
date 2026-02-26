@@ -5,26 +5,28 @@ import { useGSAP } from '@gsap/react';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import LocomotiveScroll from 'locomotive-scroll';
-import { FaVideo, FaUsers, FaLock, FaComments, FaDesktop, FaMicrophone, FaUserAlt, FaUserFriends, FaMobileAlt, FaLaptop, FaComment } from 'react-icons/fa';
-import VideoMeetComponent from './VideoMeet';
+import ScheduleMeetingModal from './ScheduleMeetingModal';
+import ScheduledMeetings from './ScheduledMeetings';
 
 gsap.registerPlugin(ScrollTrigger);
 
 const Home = ({ userName, setUserName, isLoggedIn }) => {
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
   const [roomType, setRoomType] = useState('public'); 
-  const [showRoomTypeModal, setShowRoomTypeModal] = useState(false); 
+  const [showRoomTypeModal, setShowRoomTypeModal] = useState(false);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [showJoinInput, setShowJoinInput] = useState(false);
   const [meetingCode, setMeetingCode] = useState('');
   const [joinError, setJoinError] = useState('');
   const [roomId, setRoomId] = useState('');
   const [isCreating, setIsCreating] = useState(true);
-  const [showVideoMeet, setShowVideoMeet] = useState(false);
-  const [meetingAction, setMeetingAction] = useState('');
   const navigate = useNavigate();
   const containerRef = useRef(null);
   const locomotiveScrollRef = useRef(null);
   const heroSectionRef = useRef(null);
+  
+  // ADD THIS: Ref for ScheduledMeetings component
+  const scheduledMeetingsRef = useRef(null);
 
   useEffect(() => {
     locomotiveScrollRef.current = new LocomotiveScroll({
@@ -110,24 +112,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
     });
   }, []);
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    
-    if (!userName.trim()) {
-      const guestName = `Guest-${Math.floor(Math.random() * 10000)}`;
-      setUserName(guestName);
-    }
-    
-    if (!isCreating && !roomId.trim()) {
-      alert('Please enter a room ID');
-      return;
-    }
-    
-    const targetRoomId = isCreating ? uuidv4() : roomId;
-    
-    navigate(`/room/${targetRoomId}`);
-  };
-
   const validateAndJoinMeeting = async () => {
     setJoinError('');
     
@@ -189,6 +173,74 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
     setShowRoomTypeModal(true);
   };
 
+  const handleScheduleMeeting = () => {
+    if (!isLoggedIn) {
+      document.querySelector('.navbar-signup-button')?.click();
+      return;
+    }
+    
+    setShowScheduleModal(true);
+  };
+
+  // ADD THIS: Callback to refresh meetings after scheduling
+  const handleScheduleSuccess = (meeting) => {
+    console.log('Meeting scheduled successfully:', meeting);
+    // Refresh the scheduled meetings list
+    if (scheduledMeetingsRef.current) {
+      scheduledMeetingsRef.current.refresh();
+    }
+  };
+
+  // FIX: Handle joining scheduled meetings with proper room type detection
+  const handleJoinScheduledMeeting = async (meetingId) => {
+    try {
+      const token = localStorage.getItem('token');
+      
+      if (!token) {
+        alert('Please login to join meetings');
+        return;
+      }
+
+      console.log('📋 Fetching meeting details for:', meetingId);
+
+      // First, fetch the meeting details to check room type
+      const response = await fetch(`${API_URL}/api/meetings/${meetingId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        alert(data.message || 'Failed to fetch meeting details');
+        return;
+      }
+
+      const data = await response.json();
+      const meeting = data.meeting;
+
+      console.log('✅ Meeting details:', {
+        title: meeting.title,
+        roomType: meeting.roomType,
+        status: meeting.status
+      });
+
+      // Store the room type in sessionStorage so the Room component knows
+      sessionStorage.setItem('isCreatingMeeting', 'false');
+      sessionStorage.setItem('joiningRoomId', meetingId);
+      sessionStorage.setItem('roomType', meeting.roomType || 'public');
+      
+      console.log('🚀 Navigating to room with type:', meeting.roomType);
+      
+      // Navigate to the room
+      navigate(`/room/${meetingId}`);
+      
+    } catch (error) {
+      console.error('❌ Error joining scheduled meeting:', error);
+      alert('Failed to join meeting. Please try again.');
+    }
+  };
+
   const createMeetingWithType = async (selectedRoomType) => {
     const newRoomId = uuidv4();
     
@@ -230,12 +282,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
     navigate(`/room/${newRoomId}`);
   };
 
-  const handleCloseVideoMeet = () => {
-    setShowVideoMeet(false);
-    setMeetingAction('');
-    setRoomId('');
-  };
-
   return (
     <div className="relative overflow-x-hidden" 
          ref={containerRef} 
@@ -247,59 +293,37 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
            backgroundAttachment: 'fixed'
          }}
     >
-      
-      {showVideoMeet ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900 bg-opacity-90">
-          <div className="relative w-full h-full">
-            <button 
-              className="absolute z-10 p-2 text-white bg-gray-800 rounded-full top-4 right-4 hover:bg-gray-700"
-              onClick={handleCloseVideoMeet}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-            <VideoMeetComponent 
-              roomId={roomId} 
-              isCreator={meetingAction === 'create'} 
-              userName={userName || `Guest-${Math.floor(Math.random() * 10000)}`}
-              onJoinRoom={() => navigate(`/room/${roomId}`)}
-            />
-          </div>
-        </div>
-      ) : (
-        <div className="relative min-h-screen overflow-hidden cursor-pointer backdrop-blur-sm" ref={heroSectionRef}>
+      <div className="relative min-h-screen overflow-hidden cursor-pointer backdrop-blur-sm" ref={heroSectionRef}>
+        <div className="container relative z-10 px-4 py-16 mx-auto" data-scroll-section>
+          <div className="flex flex-col items-center justify-center">
+            <div className="pt-8 mb-10 text-center">
+              <h1 className="mb-4 text-6xl font-bold text-transparent hero-title md:text-7xl bg-clip-text bg-gradient-to-r from-red-500 via-purple-500 to-blue-500">Vidula</h1>
+              <p className="text-base italic font-bold tracking-wide text-gray-700 md:text-lg hero-subtitle" style={{ fontFamily: "'Inter', sans-serif", lineHeight: '1.3', fontWeight: 700, letterSpacing: '-0.02em' }}>Vidula delivers the clarity, speed, and features you need to make it count.</p>
+            </div>
           
-          <div className="container relative z-10 px-4 py-16 mx-auto" data-scroll-section>
-            <div className="flex flex-col items-center justify-center">
-              <div className="pt-8 mb-10 text-center">
-                <h1 className="mb-4 text-6xl font-bold text-transparent hero-title md:text-7xl bg-clip-text bg-gradient-to-r from-red-500 via-purple-500 to-blue-500">Vidula</h1>
-                <p className="text-base italic font-bold tracking-wide text-gray-700 md:text-lg hero-subtitle" style={{ fontFamily: "'Inter', sans-serif", lineHeight: '1.3', fontWeight: 700, letterSpacing: '-0.02em' }}>Vidula delivers the clarity, speed, and features you need to make it count.</p>
+            <div className="flex items-center justify-center w-full mt-6 mb-14">
+              <div className="relative flex justify-center w-full max-w-sm md:max-w-md" style={{ marginTop: "-60px" }}>
+                <img 
+                  src="https://img.freepik.com/free-vector/online-tutor-concept-illustration_114360-20569.jpg?t=st=1745756177~exp=1745759777~hmac=e2975b65d8eebb3dca706be0445b3d592f47d1c56ae8053b2b505a1d3ece3775&w=826" 
+                  alt="Online tutor concept illustration" 
+                  className="w-full max-w-md border-4 shadow-lg rounded-3xl border-yellow-300/30"
+                  style={{ filter: "hue-rotate(15deg) saturate(1.4) brightness(1.05)" }}
+                />
               </div>
-            
-              
-              <div className="flex items-center justify-center w-full mt-6 mb-14">
-                <div className="relative flex justify-center w-full max-w-sm md:max-w-md" style={{ marginTop: "-60px" }}>
-                  <img 
-                    src="https://img.freepik.com/free-vector/online-tutor-concept-illustration_114360-20569.jpg?t=st=1745756177~exp=1745759777~hmac=e2975b65d8eebb3dca706be0445b3d592f47d1c56ae8053b2b505a1d3ece3775&w=826" 
-                    alt="Online tutor concept illustration" 
-                    className="w-full max-w-md border-4 shadow-lg rounded-3xl border-yellow-300/30"
-                    style={{ filter: "hue-rotate(15deg) saturate(1.4) brightness(1.05)" }}
-                  />
-                </div>
-              </div>
-            
-              <div className="flex flex-col items-center w-full max-w-md mx-auto mt-10">
-                {!showJoinInput ? (
-                  <div className="flex justify-center w-full gap-6 mb-8">
+            </div>
+          
+            <div className="flex flex-col items-center w-full max-w-md mx-auto mt-10">
+              {!showJoinInput ? (
+                <div className="flex flex-col items-center w-full gap-4 mb-8">
+                  <div className="flex justify-center w-full gap-4">
                     <button 
-                      className="px-8 py-5 text-xl font-medium text-white transition-all duration-300 bg-red-600 rounded-lg shadow-lg action-button hover:bg-red-700"
+                      className="px-6 py-4 text-lg font-medium text-white transition-all duration-300 bg-red-600 rounded-lg shadow-lg action-button hover:bg-red-700"
                       onClick={handleCreateMeeting}
                     >
                       New Meeting
                     </button>
                     <button 
-                      className="px-8 py-5 text-xl font-medium text-white transition-all duration-300 bg-gray-800 rounded-lg shadow-lg action-button hover:bg-gray-700"
+                      className="px-6 py-4 text-lg font-medium text-white transition-all duration-300 bg-gray-800 rounded-lg shadow-lg action-button hover:bg-gray-700"
                       onClick={() => {
                         if (isLoggedIn) {
                           setShowJoinInput(true);
@@ -311,71 +335,83 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
                       Join Meeting
                     </button>
                   </div>
-                ) : (
-                  <div className="w-full max-w-md p-6 mb-8 transition-all duration-300 border border-gray-200 rounded-lg shadow-lg bg-opacity-80 backdrop-blur-sm">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-xl font-medium text-gray-800">Join a Meeting</h3>
-                      <button 
-                        onClick={() => {
-                          setShowJoinInput(false);
-                          setJoinError('');
-                          setMeetingCode('');
-                        }}
-                        className="text-gray-500 transition-colors duration-200 hover:text-gray-700"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                    <div className="mb-4">
-                      <input
-                        type="text"
-                        placeholder="Enter meeting code"
-                        className="w-full px-4 py-3 text-gray-800 bg-gray-100 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
-                        value={meetingCode}
-                        onChange={(e) => {
-                          setMeetingCode(e.target.value);
-                          setJoinError('');
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            validateAndJoinMeeting();
-                          }
-                        }}
-                      />
-                      {joinError && (
-                        <div className="mt-2 text-sm text-red-500">
-                          {joinError}
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      className="w-full py-3 font-medium text-white transition-colors duration-200 bg-red-600 rounded-md hover:bg-red-700"
-                      onClick={validateAndJoinMeeting}
+                  
+                  <button 
+                    className="w-full px-6 py-4 text-lg font-medium text-white transition-all duration-300 bg-blue-600 rounded-lg shadow-lg action-button hover:bg-blue-700"
+                    onClick={handleScheduleMeeting}
+                  >
+                    Schedule Meeting
+                  </button>
+                </div>
+              ) : (
+                <div className="w-full max-w-md p-6 mb-8 transition-all duration-300 border border-gray-200 rounded-lg shadow-lg bg-opacity-80 backdrop-blur-sm">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-xl font-medium text-gray-800">Join a Meeting</h3>
+                    <button 
+                      onClick={() => {
+                        setShowJoinInput(false);
+                        setJoinError('');
+                        setMeetingCode('');
+                      }}
+                      className="text-gray-500 transition-colors duration-200 hover:text-gray-700"
                     >
-                      Join
+                      <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
                     </button>
                   </div>
-                )}
-              </div>
+                  <div className="mb-4">
+                    <input
+                      type="text"
+                      placeholder="Enter meeting code"
+                      className="w-full px-4 py-3 text-gray-800 bg-gray-100 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
+                      value={meetingCode}
+                      onChange={(e) => {
+                        setMeetingCode(e.target.value);
+                        setJoinError('');
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          validateAndJoinMeeting();
+                        }
+                      }}
+                    />
+                    {joinError && (
+                      <div className="mt-2 text-sm text-red-500">
+                        {joinError}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    className="w-full py-3 font-medium text-white transition-colors duration-200 bg-red-600 rounded-md hover:bg-red-700"
+                    onClick={validateAndJoinMeeting}
+                  >
+                    Join
+                  </button>
+                </div>
+              )}
             </div>
           </div>
-
-          
-          <div className="absolute text-gray-700 transform -translate-x-1/2 bottom-8 left-1/2 animate-bounce">
-            <p className="mb-2 text-sm">Scroll Down</p>
-            <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-            </svg>
-          </div>
         </div>
-      )}
+
+        <div className="absolute text-gray-700 transform -translate-x-1/2 bottom-8 left-1/2 animate-bounce">
+          <p className="mb-2 text-sm">Scroll Down</p>
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+          </svg>
+        </div>
+      </div>
+
+      {/* UPDATED: Added ref and onJoinMeeting callback */}
+      <ScheduledMeetings 
+        ref={scheduledMeetingsRef}
+        isLoggedIn={isLoggedIn}
+        onJoinMeeting={handleJoinScheduledMeeting}
+      />
       
       <div className="relative py-24 overflow-hidden text-gray-800 backdrop-blur-sm creative-text-section" data-scroll-section>
         <div className="container px-4 mx-auto">
           <div className="max-w-5xl mx-auto">
-            
             <div className="mb-32 creative-text-block" data-scroll data-scroll-speed="0.5">
               <style jsx>{`
                 @keyframes gradientAnimation {
@@ -401,7 +437,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
               </h2>
             </div>
             
-            
             <div className="mb-32 creative-text-block" data-scroll data-scroll-speed="0.3">
               <div className="flex flex-col items-center justify-between gap-8 md:flex-row">
                 <div className="md:w-1/2">
@@ -423,7 +458,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
               </div>
             </div>
             
-            
             <div className="creative-text-block" data-scroll data-scroll-speed="0.4">
               <div className="flex flex-col items-center justify-between gap-8 md:flex-row-reverse">
                 <div className="md:w-1/2">
@@ -444,53 +478,9 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
                 </div>
               </div>
             </div>
-            
-            <div className="mb-32 creative-text-block" data-scroll data-scroll-speed="0.4">
-              <div className="flex flex-col items-center justify-between gap-8 md:flex-row">
-                <div className="md:w-1/2">
-                  <h3 className="mb-6 text-3xl font-bold text-gray-800 md:text-4xl creative-subheading">
-                    <span className="text-red-500">Any</span> Device, Anywhere
-                  </h3>
-                  <p className="text-xl leading-relaxed text-gray-700 animated-text">
-                    Join meetings seamlessly from your desktop, tablet, or phone. Vidula adapts to your lifestyle and work preferences.
-                  </p>
-                </div>
-                <div className="flex justify-center md:w-1/2">
-                  <img 
-                    src="https://img.freepik.com/free-vector/illustrated-best-friends-video-calling_23-2148504107.jpg?t=st=1745757045~exp=1745760645~hmac=a03bcd5dfedb90fda331a186c3afae6a02805982c7fb56da026e148e04a80f18&w=826" 
-                    alt="Best friends video calling illustration" 
-                    className="w-full max-w-md border-4 shadow-lg rounded-3xl border-yellow-300/30"
-                    style={{ filter: "hue-rotate(15deg) saturate(1.4) brightness(1.05)" }}
-                  />
-                </div>
-              </div>
-            </div>
-            
-            <div className="mb-32 creative-text-block" data-scroll data-scroll-speed="0.4">
-              <div className="flex flex-col items-center justify-between gap-8 md:flex-row-reverse">
-                <div className="md:w-1/2">
-                  <h3 className="mb-6 text-3xl font-bold text-gray-800 md:text-4xl creative-subheading">
-                    <span className="text-red-500">Team</span> Collaboration Reimagined
-                  </h3>
-                  <p className="text-xl leading-relaxed text-gray-700 animated-text">
-                    Share ideas, screens, and breakthroughs in real-time. Vidula brings your team's collective genius into one virtual space.
-                  </p>
-                </div>
-                <div className="flex justify-center md:w-1/2">
-                  <img 
-                    src="https://img.freepik.com/free-vector/employees-working-from-home-concept_52683-41250.jpg?t=st=1745757426~exp=1745761026~hmac=58ec4bf9027f8e48cd56e14d67582403dcbdcb199419ed381a2c6be373a39dc4&w=826" 
-                    alt="Employees working from home illustration" 
-                    className="w-full max-w-md border-4 shadow-lg rounded-3xl border-yellow-300/30"
-                    style={{ filter: "hue-rotate(15deg) saturate(1.4) brightness(1.05)" }}
-                  />
-                </div>
-              </div>
-            </div>
-            
           </div>
         </div>
       </div>
-      
       
       <div id="how-it-works" className="relative pt-12 pb-24 overflow-hidden text-gray-800 backdrop-blur-sm how-it-works-section" data-scroll-section>
         <div className="container px-4 mx-auto">
@@ -547,7 +537,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
         </div>
       </div>
 
-      
       <footer className="relative py-12 overflow-hidden text-gray-800 border-t border-gray-200 backdrop-blur-sm" data-scroll-section>
         <div className="container px-4 mx-auto">
           <div className="flex flex-col items-center justify-between md:flex-row">
@@ -567,7 +556,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
         </div>
       </footer>
 
-      {/* Room Type Selection Modal */}
       {showRoomTypeModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-75">
           <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-2xl">
@@ -576,7 +564,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
             </h2>
             
             <div className="space-y-4 mb-6">
-              {/* Public Room Option */}
               <button
                 onClick={() => {
                   setShowRoomTypeModal(false);
@@ -597,7 +584,6 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
                 </div>
               </button>
               
-              {/* Private Room Option */}
               <button
                 onClick={() => {
                   setShowRoomTypeModal(false);
@@ -628,6 +614,14 @@ const Home = ({ userName, setUserName, isLoggedIn }) => {
           </div>
         </div>
       )}
+
+      {/* UPDATED: Added onScheduleSuccess callback */}
+      <ScheduleMeetingModal 
+        isOpen={showScheduleModal}
+        onClose={() => setShowScheduleModal(false)}
+        userName={userName}
+        onScheduleSuccess={handleScheduleSuccess}
+      />
     </div>
   );
 };

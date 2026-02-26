@@ -8,6 +8,7 @@ import dotenv from 'dotenv';
 import connectDB from './config/db.js';
 import userRoutes from './routes/userRoutes.js';
 import meetingRoutes from './routes/meetingRoutes.js';
+import Meeting from './models/meeting-model.js'; // ADDED THIS IMPORT
 
 dotenv.config();
 
@@ -164,6 +165,34 @@ function cleanupEmptyRoom(roomId) {
   return false;
 }
 
+// CRITICAL FIX: Helper function to get room type from database for scheduled meetings
+async function getRoomTypeFromDatabase(roomId) {
+  try {
+    const meeting = await Meeting.findOne({ meetingId: roomId });
+    if (meeting) {
+      // Convert creator ObjectId to string for consistent comparison
+      const creatorIdString = meeting.creator.toString();
+      
+      console.log(`📋 Found scheduled meeting in DB:`);
+      console.log(`   Title: ${meeting.title}`);
+      console.log(`   Type: ${meeting.roomType}`);
+      console.log(`   Creator ObjectId: ${meeting.creator}`);
+      console.log(`   Creator String: ${creatorIdString}`);
+      
+      return {
+        roomType: meeting.roomType || 'public',
+        creatorId: creatorIdString,  // Return as string for consistent comparison
+        title: meeting.title
+      };
+    }
+    console.log(`📋 No scheduled meeting found in DB for: ${roomId}`);
+    return null;
+  } catch (error) {
+    console.error('❌ Error fetching meeting from DB:', error);
+    return null;
+  }
+}
+
 // ============================================================================
 // SOCKET.IO EVENT HANDLERS
 // ============================================================================
@@ -174,22 +203,50 @@ io.on('connection', (socket) => {
   // -------------------------------------------------------------------------
   // REQUEST TO JOIN ROOM
   // -------------------------------------------------------------------------
-  socket.on('request-join-room', (roomId, userId, userName) => {
+  socket.on('request-join-room', async (roomId, userId, userName) => {
     console.log(`\n📥 JOIN REQUEST: ${userName} (${userId}) → Room ${roomId}`);
     
-    const room = getRoom(roomId);
+    let room = getRoom(roomId);
     
-    // If room doesn't exist, auto-approve (will be created)
+    // CRITICAL FIX: If room doesn't exist in memory, check database
     if (!room) {
-      console.log(`  ✅ Room doesn't exist - auto-approving`);
-      socket.emit('join-approved', roomId);
-      return;
+      const dbMeeting = await getRoomTypeFromDatabase(roomId);
+      
+      if (dbMeeting) {
+        // This is a scheduled meeting - create room with DB data
+        console.log(`  ✅ Found scheduled meeting - creating room as ${dbMeeting.roomType}`);
+        console.log(`  👤 Creator ID from DB: ${dbMeeting.creatorId}`);
+        console.log(`  👤 Current user ID: ${userId}`);
+        room = createRoom(roomId, dbMeeting.creatorId, userName, dbMeeting.roomType);
+      } else {
+        // No meeting in DB - this will be created when they join
+        console.log(`  ✅ No scheduled meeting - will auto-approve`);
+        socket.emit('join-approved', roomId);
+        return;
+      }
     }
     
     // Check if user was previously denied
     if (room.deniedUsers.has(userId)) {
       console.log(`  ❌ User was previously denied`);
       socket.emit('join-denied', 'You were previously denied access to this room');
+      return;
+    }
+    
+    // CRITICAL FIX: Check if user is the creator (handle both string comparison and ObjectId)
+    const isCreator = room.creatorId === userId || 
+                      room.creatorId.toString() === userId || 
+                      room.creatorId === userId.toString() ||
+                      room.creatorId.toString() === userId.toString();
+    
+    console.log(`  🔍 Creator check:`);
+    console.log(`     Room creator: ${room.creatorId} (${typeof room.creatorId})`);
+    console.log(`     Current user: ${userId} (${typeof userId})`);
+    console.log(`     Is creator: ${isCreator}`);
+    
+    if (isCreator) {
+      console.log(`  ✅ User is creator - auto-approving`);
+      socket.emit('join-approved', roomId);
       return;
     }
     
@@ -207,7 +264,7 @@ io.on('connection', (socket) => {
     const alreadyWaiting = room.waitingRoom.find(u => u.userId === userId);
     if (alreadyWaiting) {
       console.log(`  ⚠️  Already in waiting room`);
-      socket.emit('waiting-for-approval', `Waiting for ${room.creatorName} to let you in...`);
+      socket.emit('waiting-for-approval', `Waiting for the host to let you in...`);
       return;
     }
     
@@ -221,13 +278,17 @@ io.on('connection', (socket) => {
     room.waitingRoom.push(waitingUser);
     
     // Notify user they're waiting
-    socket.emit('waiting-for-approval', `Waiting for ${room.creatorName} to let you in...`);
+    socket.emit('waiting-for-approval', `Waiting for the host to let you in...`);
     
-    // Notify creator
-    const creatorSocketId = userSockets.get(room.creatorId);
+    // Notify creator (use proper creator ID lookup)
+    const creatorSocketId = userSockets.get(room.creatorId) || 
+                            userSockets.get(room.creatorId.toString());
+    
     if (creatorSocketId) {
       io.to(creatorSocketId).emit('join-request', waitingUser);
       io.to(creatorSocketId).emit('waiting-room-updated', room.waitingRoom);
+    } else {
+      console.log(`  ⚠️  Creator socket not found for ID: ${room.creatorId}`);
     }
     
     console.log(`  ✅ Added to waiting room (${room.waitingRoom.length} waiting)`);
@@ -297,7 +358,7 @@ io.on('connection', (socket) => {
   // -------------------------------------------------------------------------
   // JOIN ROOM (After Approval)
   // -------------------------------------------------------------------------
-  socket.on('join-room', (roomId, userId, userName, roomType = 'public') => {
+  socket.on('join-room', async (roomId, userId, userName, roomType = 'public') => {
     console.log(`\n🏠 JOIN ROOM: ${userName} (${userId}) → Room ${roomId}`);
     
     // Join socket.io room
@@ -308,11 +369,22 @@ io.on('connection', (socket) => {
     let isNewRoom = false;
     
     if (!room) {
-      room = createRoom(roomId, userId, userName, roomType);
+      // CRITICAL FIX: Check if this is a scheduled meeting in the database
+      const dbMeeting = await getRoomTypeFromDatabase(roomId);
+      
+      if (dbMeeting) {
+        // This is a scheduled meeting - use the room type from database
+        console.log(`✅ Creating room from scheduled meeting - Type: ${dbMeeting.roomType}`);
+        room = createRoom(roomId, dbMeeting.creatorId, userName, dbMeeting.roomType);
+      } else {
+        // This is a new instant meeting - use the provided room type
+        console.log(`✅ Creating new instant meeting - Type: ${roomType}`);
+        room = createRoom(roomId, userId, userName, roomType);
+      }
       isNewRoom = true;
     }
     
-    const isCreator = room.creatorId === userId;
+    const isCreator = room.creatorId === userId || room.creatorId.toString() === userId;
     
     // Add participant to room
     addParticipant(roomId, userId, userName, socket.id);
@@ -325,6 +397,7 @@ io.on('connection', (socket) => {
     const existingParticipants = allParticipants.filter(p => p.userId !== userId);
     
     console.log(`  👥 Room has ${allParticipants.length} participants`);
+    console.log(`  🔒 Room type: ${room.roomType}`);
     
     // Send all participants to joining user
     socket.emit('all-participants', allParticipants);
@@ -347,7 +420,7 @@ io.on('connection', (socket) => {
       });
     });
     
-    console.log(`  ✅ ${userName} successfully joined room`);
+    console.log(`  ✅ ${userName} successfully joined ${room.roomType} room`);
   });
   
   // -------------------------------------------------------------------------
@@ -406,7 +479,7 @@ io.on('connection', (socket) => {
     const room = getRoom(roomId);
     if (!room) return;
     
-    const isCreator = room.creatorId === userId;
+    const isCreator = room.creatorId === userId || room.creatorId.toString() === userId;
     
     io.to(roomId).emit('receive-message', {
       message,

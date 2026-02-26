@@ -20,6 +20,19 @@ const meetingSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
+  isScheduled: {
+    type: Boolean,
+    default: false
+  },
+  scheduledAt: {
+    type: Date,
+    default: null
+  },
+  status: {
+    type: String,
+    enum: ['scheduled', 'active', 'ended', 'cancelled'],
+    default: 'active'
+  },
   participants: [{
     userId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -43,7 +56,6 @@ const meetingSchema = new mongoose.Schema({
     requestedAt: { type: Date, default: Date.now }
   }],
   deniedUsers: [String],
-
   startTime: {
     type: Date,
     default: Date.now
@@ -82,7 +94,13 @@ const meetingSchema = new mongoose.Schema({
       default: Date.now
     }
   }]
+}, {
+  timestamps: true
 });
+
+meetingSchema.index({ creator: 1, scheduledAt: 1 });
+meetingSchema.index({ meetingId: 1 });
+meetingSchema.index({ status: 1 });
 
 const Meeting = mongoose.model('Meeting', meetingSchema);
 
